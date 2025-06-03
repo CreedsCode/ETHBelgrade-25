@@ -3,7 +3,7 @@
 This template describes a React front-end app with
 
 - [PAPI](papi.how) + [ReactiveDOT](https://reactivedot.dev) + [dotconnect](https://dotconnect.dev/) for chain and wallet interactions.<br/>
-- [Tailwind CSS](https://tailwindcss.com) + [Tailwind UI](https://tailwindui.com/). <br/>
+- [Tailwind CSS](https://tailwindcss.com) + [Tailwind UI](1https://tailwindui.com/). <br/>
 - [Vite](https://vite.dev/) for dev tooling.
 
 ### Note on wallet connection
