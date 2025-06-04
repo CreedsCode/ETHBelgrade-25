@@ -21,6 +21,7 @@ interface UploadedReceipt {
   isCollapsed: boolean;
   isProcessing: boolean;
   extractedText?: string; // Store raw extracted text for debugging or re-parsing
+  ocrFailed?: boolean; // Flag to indicate OCR failure
 }
 
 type OcrQueueItem = string; // Just the ID
@@ -63,19 +64,24 @@ function App() {
   useEffect(() => {
     if (!currentOcrProcessId && ocrQueue.length > 0) {
       const nextReceiptId = ocrQueue[0];
-      const receiptToProcess = uploadedReceiptsRef.current.find(r => r.id === nextReceiptId);
+      const receiptToProcess = uploadedReceipts.find(r => r.id === nextReceiptId);
 
-      if (receiptToProcess) {
+      if (receiptToProcess && receiptToProcess.imageUrl) {
         setUploadedReceipts(prev => prev.map(r =>
           r.id === nextReceiptId ? { ...r, isProcessing: true } : r
         ));
         setCurrentOcrProcessId(nextReceiptId);
         performOCR(nextReceiptId, receiptToProcess.imageUrl);
       } else {
-        setOcrQueue(prev => prev.slice(1));
+        if (!receiptToProcess) {
+          console.warn(`Receipt ID ${nextReceiptId} in OCR queue but not found in uploadedReceipts. Removing from queue.`);
+        } else {
+          console.warn(`Receipt ID ${nextReceiptId} found but missing imageUrl. Removing from queue.`);
+        }
+        setOcrQueue(prev => prev.filter(id => id !== nextReceiptId));
       }
     }
-  }, [ocrQueue, currentOcrProcessId]);
+  }, [ocrQueue, currentOcrProcessId, uploadedReceipts]);
 
   const processFiles = async (files: FileList) => {
     const newReceipts: UploadedReceipt[] = Array.from(files).map(file => {
@@ -184,16 +190,16 @@ function App() {
 
 
       setUploadedReceipts(prev => prev.map(r =>
-        r.id === receiptId ? { ...r, total: detectedTotal, itemDetails: items, isProcessing: false, extractedText } : r
+        r.id === receiptId ? { ...r, total: detectedTotal, itemDetails: items, isProcessing: false, extractedText, ocrFailed: false } : r
       ));
     } catch (error) {
       console.error(`Error during OCR for ${receiptId}:`, error);
       setUploadedReceipts(prev => prev.map(r =>
-        r.id === receiptId ? { ...r, total: 'Error', itemDetails: [], isProcessing: false, extractedText: "OCR Failed" } : r
+        r.id === receiptId ? { ...r, total: 'Error', itemDetails: [], isProcessing: false, extractedText: "OCR Failed", ocrFailed: true } : r
       ));
     } finally {
       // Move to the next item in the queue
-      setOcrQueue(prev => prev.slice(1));
+      setOcrQueue(prevQueue => prevQueue.filter(id => id !== receiptId));
       // If this was the one being processed, clear currentOcrProcessId
       if (currentOcrProcessId === receiptId) {
         setCurrentOcrProcessId(null);
@@ -258,6 +264,17 @@ function App() {
     }
   };
 
+  const handleAddItem = (receiptId: string) => {
+    setUploadedReceipts(prev => prev.map(r =>
+      r.id === receiptId ? {
+        ...r,
+        itemDetails: [
+          ...r.itemDetails,
+          { id: `manual-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`, description: '', quantity: '1', price: '0.00' }
+        ]
+      } : r
+    ));
+  };
 
   const handleRequestAddressChange = (event: ChangeEvent<HTMLInputElement>) => setRequestAddress(event.target.value);
   const handleTitleChange = (event: ChangeEvent<HTMLInputElement>) => setTitle(event.target.value);
@@ -301,7 +318,7 @@ function App() {
             </div>
       <div>
               <label htmlFor="title" className="block text-sm font-medium text-slate-700">Expense Title</label>
-              <input type="text" id="title" value={title} onChange={handleTitleChange} className={inputClass} placeholder="e.g., Team Dinner Q3" />
+              <input type="text" id="title" value={title} onChange={(e) => handleTitleChange(e)} className={inputClass} placeholder="e.g., Team Dinner Q3" />
             </div>
       </div>
 
@@ -309,25 +326,21 @@ function App() {
           <div 
             className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors duration-200 ease-in-out
                         ${isDragging ? 'border-sky-500 bg-sky-50' : 'border-slate-300 hover:border-slate-400'}
-                        ${isAnyOcrLoading ? 'opacity-70 cursor-not-allowed' : ''}`
+                        /* ${isAnyOcrLoading ? 'opacity-70 cursor-not-allowed' : ''} */`
           }
             onDragOver={handleDragOver}
             onDragEnter={handleDragEnter}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
-            onClick={() => !isAnyOcrLoading && document.getElementById('fileUpload')?.click()}
+            onClick={() => /* !isAnyOcrLoading && */ document.getElementById('fileUpload')?.click()}
           >
-            <input type="file" id="fileUpload" multiple onChange={handleImageChange} className="hidden" disabled={isAnyOcrLoading} />
-            {isAnyOcrLoading ? (
-              <div className="flex flex-col items-center">
-                <svg className="animate-spin h-8 w-8 text-sky-500 mb-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-                <p className="text-sm text-slate-500">Processing receipts... ({ocrQueue.length + (currentOcrProcessId ? 1:0)} remaining)</p>
-              </div>
-            ) : (
-              <p className="text-slate-500">Drag & drop receipt images here, or click to select files.</p>
+            <input type="file" id="fileUpload" multiple onChange={handleImageChange} className="hidden" /* disabled={isAnyOcrLoading} */ />
+            {/* Always show the upload prompt, remove the global spinner from here */}
+            <p className="text-slate-500">Drag & drop receipt images here, or click to select files.</p>
+            {(ocrQueue.length > 0 || currentOcrProcessId) && (
+              <p className="text-xs text-slate-400 mt-2">
+                {ocrQueue.length + (currentOcrProcessId ? 1 : 0)} item(s) currently in OCR process.
+              </p>
             )}
           </div>
 
@@ -356,18 +369,51 @@ function App() {
                     </div>
                     {!receipt.isCollapsed && (
                       <div className="mt-3 border-t border-slate-200 pt-3">
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2 text-xs font-medium text-slate-500">
-                          <div>Item Description</div>
-                          <div>Quantity</div>
-                          <div>Price ($)</div>
-                        </div>
-                        {receipt.itemDetails.map((item) => (
-                          <div key={item.id} className="grid grid-cols-1 md:grid-cols-3 gap-2 items-center mb-1">
-                            <input type="text" value={item.description} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'description', e.target.value)} className={`${inputClass} text-xs p-1`} />
-                            <input type="text" value={item.quantity} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'quantity', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} />
-                            <input type="text" value={item.price} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'price', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} />
+                        {receipt.ocrFailed ? (
+                          // OCR Failed View
+                          <div>
+                            <p className="text-red-500 font-semibold mb-2">OCR Failed. Please enter details manually.</p>
+                            <div className="mb-4">
+                                <img src={receipt.imageUrl} alt={receipt.fileName} className="max-w-xs max-h-48 rounded border border-slate-300"/>
+                            </div>
+                            <div className="mb-3">
+                                <span className="text-sm font-medium text-slate-700">Currency: </span>
+                                <span className="text-sm text-slate-600">USD (Fixed)</span>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2 text-xs font-medium text-slate-500">
+                              <div>Item Description</div>
+                              <div>Quantity</div>
+                              <div>Price ($)</div>
+                            </div>
+                            {receipt.itemDetails.map((item) => (
+                              <div key={item.id} className="grid grid-cols-1 md:grid-cols-3 gap-2 items-center mb-1">
+                                <input type="text" value={item.description} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'description', e.target.value)} className={`${inputClass} text-xs p-1`} placeholder="Item name"/>
+                                <input type="text" value={item.quantity} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'quantity', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} placeholder="1"/>
+                                <input type="text" value={item.price} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'price', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} placeholder="0.00"/>
+                              </div>
+                            ))}
+                            <button onClick={() => handleAddItem(receipt.id)} className={`${secondaryButtonClass} mt-2`}>
+                              Add Item
+                            </button>
                           </div>
-                        ))}
+                        ) : (
+                          // OCR Succeeded or Pending View (Original item display)
+                          <div>
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2 text-xs font-medium text-slate-500">
+                              <div>Item Description</div>
+                              <div>Quantity</div>
+                              <div>Price ($)</div>
+                            </div>
+                            {receipt.itemDetails.map((item) => (
+                              <div key={item.id} className="grid grid-cols-1 md:grid-cols-3 gap-2 items-center mb-1">
+                                <input type="text" value={item.description} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'description', e.target.value)} className={`${inputClass} text-xs p-1`} />
+                                <input type="text" value={item.quantity} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'quantity', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} />
+                                <input type="text" value={item.price} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'price', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} />
+                              </div>
+                            ))}
+                          </div>
+                        )}
                          {receipt.extractedText && (
                             <details className="mt-2 text-xs">
                                 <summary className="cursor-pointer text-slate-400 hover:text-slate-600">View raw OCR text</summary>
@@ -386,12 +432,12 @@ function App() {
           {uploadedReceipts.length > 0 && (
             <div className="mt-10 pt-6 border-t border-slate-200 flex flex-col items-end">
               <p className="text-2xl font-bold text-slate-700 mb-4">Grand Total: ${grandTotal}</p>
-              <button 
-                onClick={handleSubmitRequest} 
+              <button
+                onClick={handleSubmitRequest}
                 className={`${buttonClass} w-full md:w-auto`}
-                disabled={!walletAccount || uploadedReceipts.length === 0 || isAnyOcrLoading}
+                disabled={!walletAccount || uploadedReceipts.length === 0 || uploadedReceipts.some(r => r.isProcessing) || ocrQueue.length > 0 || !!currentOcrProcessId}
               >
-                {isAnyOcrLoading ? 'Processing Receipts...' : (!walletAccount ? 'Connect Wallet to Submit' : 'Submit Expense Request')}
+                {(uploadedReceipts.some(r => r.isProcessing) || ocrQueue.length > 0 || !!currentOcrProcessId) ? 'Processing Receipts...' : (!walletAccount ? 'Connect Wallet to Submit' : 'Submit Expense Request')}
               </button>
                {!walletAccount && <p className="text-xs text-red-500 mt-1">Wallet not connected.</p>}
             </div>
