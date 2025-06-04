@@ -21,6 +21,31 @@ export const passetHub = {
   },
 } as const
 
+export const iexec = {
+  id: 134,
+  name: 'iExec Sidechain',
+  network: 'iexec',
+  nativeCurrency: {
+    decimals: 18,
+    name: 'xRLC',
+    symbol: 'xRLC',
+  },
+  rpcUrls: {
+    default: {
+      http: ["https://bellecour.iex.ec"],
+    },
+    public: {
+      http: ["https://bellecour.iex.ec"],
+    },
+  },
+  blockExplorers: {
+    default: { name: "BlockScout", url: "https://blockscout-bellecour.iex.ec/" },
+  },
+} as const
+
+// Array of all supported chains
+export const supportedChains = [passetHub, iexec];
+
 // Create a public client for reading data
 export const publicClient = createPublicClient({
   chain: passetHub,

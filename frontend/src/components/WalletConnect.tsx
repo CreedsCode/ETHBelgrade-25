@@ -1,154 +1,160 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import { useChainSwitcher } from "../hooks/useChainSwitcher";
 import { passetHub } from "../utils/viem";
 
 interface WalletConnectProps {
   onConnect: (account: string) => void;
+  className?: string;
 }
 
-const WalletConnect: React.FC<WalletConnectProps> = ({ onConnect }) => {
+interface ConnectErrorType extends Error {
+  code?: number;
+}
+
+const WalletConnect: React.FC<WalletConnectProps> = ({ onConnect, className }) => {
   const [account, setAccount] = useState<string | null>(null);
-  const [chainId, setChainId] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [connectError, setConnectError] = useState<string | null>(null);
+  const [targetChainId, setTargetChainId] = useState<number>(passetHub.id);
+
+  const {
+    currentChainId,
+    switchChain,
+    isSwitching,
+    error: hookError,
+    supportedChains,
+    getChainName,
+  } = useChainSwitcher();
 
   useEffect(() => {
-    // Check if user already has an authorized wallet connection
     const checkConnection = async () => {
-      if (typeof window !== 'undefined' && window.ethereum) {
+      const ethereum = window.ethereum;
+      if (typeof window !== 'undefined' && ethereum) {
         try {
-          // eth_accounts doesn't trigger the wallet popup
-          const accounts = await window.ethereum.request({
-            method: 'eth_accounts',
-          }) as string[];
-
-          if (accounts.length > 0) {
+          const accounts = await ethereum.request({ method: 'eth_accounts' }) as string[];
+          if (accounts.length > 0 && accounts[0]) {
             setAccount(accounts[0]);
-            const chainIdHex = await window.ethereum.request({
-              method: 'eth_chainId',
-            }) as string;
-            setChainId(parseInt(chainIdHex, 16));
             onConnect(accounts[0]);
           }
         } catch (err) {
-          console.error('Error checking connection:', err);
-          setError('Failed to check wallet connection');
+          console.error('Error checking initial connection:', err);
+          setConnectError('Failed to check initial wallet connection');
         }
       }
     };
-
     checkConnection();
 
-    if (typeof window !== 'undefined' && window.ethereum) {
-      // Setup wallet event listeners
-      window.ethereum.on('accountsChanged', (accounts: string[]) => {
-        setAccount(accounts[0] || null);
-        if (accounts[0]) onConnect(accounts[0]);
-      });
-
-      window.ethereum.on('chainChanged', (chainIdHex: string) => {
-        setChainId(parseInt(chainIdHex, 16));
-      });
+    const ethereum = window.ethereum;
+    if (typeof window !== 'undefined' && ethereum) {
+      const handleAccountsChanged = (accounts: string[]) => {
+        const newAccount = accounts[0] || null;
+        setAccount(newAccount);
+        if (newAccount) {
+          onConnect(newAccount);
+        } else {
+          console.log("Wallet disconnected from WalletConnect component");
+        }
+      };
+      ethereum.on('accountsChanged', handleAccountsChanged);
+      return () => {
+        ethereum.removeListener('accountsChanged', handleAccountsChanged);
+      };
     }
-
-    return () => {
-      // Cleanup event listeners
-      if (typeof window !== 'undefined' && window.ethereum) {
-        window.ethereum.removeListener('accountsChanged', () => {});
-        window.ethereum.removeListener('chainChanged', () => {});
-      }
-    };
   }, [onConnect]);
 
-  const connectWallet = async () => {
-    if (typeof window === 'undefined' || !window.ethereum) {
-      setError(
-        'MetaMask not detected! Please install MetaMask to use this dApp.'
-      );
+  const handleConnectWallet = async () => {
+    const ethereum = window.ethereum;
+    if (typeof window === 'undefined' || !ethereum) {
+      setConnectError('MetaMask not detected! Please install MetaMask.');
       return;
     }
-
+    setConnectError(null);
     try {
-      // First try to add/switch to the correct network
-      try {
-        await window.ethereum.request({
-          method: 'wallet_switchEthereumChain',
-          params: [{ chainId: `0x${passetHub.id.toString(16)}` }],
-        });
-      } catch (switchError: unknown) {
-        if (switchError && typeof switchError === 'object' && 'code' in switchError && switchError.code === 4902) {
-          await window.ethereum.request({
-            method: 'wallet_addEthereumChain',
-            params: [
-              {
-                chainId: `0x${passetHub.id.toString(16)}`,
-                chainName: passetHub.name,
-                rpcUrls: [passetHub.rpcUrls.default.http[0]],
-                nativeCurrency: {
-                  name: passetHub.nativeCurrency.name,
-                  symbol: passetHub.nativeCurrency.symbol,
-                  decimals: passetHub.nativeCurrency.decimals,
-                },
-              },
-            ],
-          });
-        }
-      }
-
-      // Then request account access
-      const accounts = await window.ethereum.request({
+      const accounts = await ethereum.request({
         method: 'eth_requestAccounts',
       }) as string[];
-
-      setAccount(accounts[0]);
-      onConnect(accounts[0]);
-
-      const chainIdHex = await window.ethereum.request({
-        method: 'eth_chainId',
-      }) as string;
-      setChainId(parseInt(chainIdHex, 16));
-
-    } catch (err: Error | unknown) {
-      console.error('Error connecting to wallet:', err);
-      setError(err instanceof Error ? err.message : 'Failed to connect wallet. Please try again.');
+      
+      const newAccount = accounts[0];
+      if (newAccount) {
+        setAccount(newAccount);
+        onConnect(newAccount);
+        if (currentChainId !== targetChainId) {
+          await switchChain(targetChainId);
+        }
+      } else {
+        setConnectError('Failed to retrieve accounts. Please try again.');
+      }
+    } catch (err) {
+      const typedError = err as ConnectErrorType;
+      console.error('Error connecting to wallet:', typedError);
+      setConnectError(typedError.message || 'Failed to connect wallet. Please try again.');
     }
   };
 
-  // UI-only disconnection - MetaMask doesn't support programmatic disconnection
+  const handleSwitchChain = async () => {
+    if (targetChainId === currentChainId) return;
+    await switchChain(targetChainId);
+  };
+
   const disconnectWallet = () => {
     setAccount(null);
   };
 
+  const displayedError = connectError || hookError;
+  const currentChainDisplayName = getChainName(currentChainId);
+  const targetChainDisplayName = getChainName(targetChainId);
+
   return (
-    <div className="border border-pink-500 rounded-lg p-4 shadow-md bg-white text-pink-500 max-w-sm mx-auto">
-      {error && <p className="text-red-500 text-sm mb-2">{error}</p>}
+    <div className={`flex flex-col md:flex-row items-center space-y-2 md:space-y-0 md:space-x-4 ${className || ''}`}>
+      {displayedError && <p className="text-red-500 text-xs px-2 py-1 bg-red-100 rounded">Error: {displayedError}</p>}
+
+      <div className="flex items-center space-x-2">
+        <span className="text-sm font-medium whitespace-nowrap">{currentChainDisplayName}</span>
+        {account && (
+          <select 
+            value={targetChainId}
+            onChange={(e) => setTargetChainId(Number(e.target.value))}
+            disabled={isSwitching || !account} 
+            className="bg-gray-700 border border-gray-600 text-white text-xs rounded-lg focus:ring-pink-500 focus:border-pink-500 p-1.5 disabled:opacity-70 max-w-[150px]"
+          >
+            {supportedChains.map(chain => (
+              <option key={chain.id} value={chain.id}>
+                {chain.name}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
 
       {!account ? (
         <button
-          onClick={connectWallet}
-          className="w-full bg-pink-500 hover:bg-pink-600 text-white font-bold py-2 px-4 rounded-lg transition"
+          onClick={handleConnectWallet}
+          disabled={isSwitching && currentChainId === null} 
+          className="bg-pink-600 hover:bg-pink-700 text-white font-semibold py-2 px-4 rounded-lg text-sm transition disabled:opacity-60 whitespace-nowrap"
         >
-          Connect Wallet
+          {isSwitching && currentChainId === null ? 'Connecting...' : 'Connect Wallet'} 
         </button>
       ) : (
-        <div className="flex flex-col items-center">
-          <span className="text-sm font-mono bg-pink-100 px-2 py-1 rounded-md text-pink-700">
-            {`${account.substring(0, 6)}...${account.substring(38)}`}
+        <div className="flex items-center space-x-2">
+          <span className="text-xs font-mono bg-pink-100 px-2 py-1 rounded-md text-pink-700 whitespace-nowrap">
+            {`${account.substring(0, 6)}...${account.substring(account.length - 4)}`}
           </span>
+          {currentChainId !== targetChainId && (
+            <button
+              onClick={handleSwitchChain}
+              disabled={isSwitching}
+              className="bg-yellow-500 hover:bg-yellow-600 text-white font-semibold py-1.5 px-3 rounded-lg text-xs transition disabled:opacity-60 whitespace-nowrap"
+            >
+              {isSwitching ? 'Switching...' : `Switch to ${targetChainDisplayName}`}
+            </button>
+          )}
           <button
             onClick={disconnectWallet}
-            className="mt-3 w-full bg-gray-200 hover:bg-gray-300 text-pink-500 py-2 px-4 rounded-lg transition"
+            className="bg-gray-600 hover:bg-gray-700 text-white font-semibold py-2 px-3 rounded-lg transition text-sm whitespace-nowrap"
           >
             Disconnect
           </button>
-          {chainId !== passetHub.id && (
-            <button
-              onClick={connectWallet}
-              className="mt-3 w-full bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-2 px-4 rounded-lg transition"
-            >
-              Switch to Passet Hub
-            </button>
-          )}
         </div>
       )}
     </div>
