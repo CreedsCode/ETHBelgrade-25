@@ -11,3 +11,8 @@ This template describes a React front-end app with
 This template has PJS Apps, Talisman, SubWallet and Ledger enabled by default.
 In order to enable WalletConnect, set up WalletConnect project ID / metadata in [reactive-dot.ts](./templates/react-tailwind/src/reactive-dot.ts)
 # ETHBelgrade-25
+
+
+pnpm dlx hardhat ignition deploy ./ignition/modules/StorageModule.js
+https://papermoonio.github.io/polkadot-mkdocs/tutorials/smart-contracts/launch-your-first-project/test-and-deploy-with-hardhat/#prerequisites
+npx hardhat run scripts/interact.js --network passetHub
