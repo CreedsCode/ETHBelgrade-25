@@ -70,7 +70,8 @@ export function useExpenses() {
       const walletClient = await getWalletClient();
       
       // First approve the stable coin spending
-      await approveStableCoin(totalAmount);
+      // Consider making approveStableCoin a separate step in UI for better UX
+      // await approveStableCoin(totalAmount); 
       
       // Then batch pay the items
       const hash = await walletClient.writeContract({
@@ -177,5 +178,6 @@ export function useExpenses() {
     getExpensesReadyForReview,
     getCreatorExpenses,
     getUnpaidTotal,
+    approveStableCoin,
   };
 } 

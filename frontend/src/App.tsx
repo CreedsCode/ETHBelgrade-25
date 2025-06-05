@@ -3,6 +3,7 @@ import type { ChangeEvent, DragEvent } from 'react'; // Type-only imports
 import Tesseract from 'tesseract.js'; 
 import type { RecognizeResult, LoggerMessage } from 'tesseract.js'; // Added LoggerMessage
 import NavBar from './components/NavBar'; // For Wallet Integration
+import PayerDashboard from './components/PayerDashboard'; // Import PayerDashboard
 import { useExpenses } from './hooks/useExpenses';
 import { decodeEventLog, type Log, type TransactionReceipt, type Hash, type Hex, encodeEventTopics } from 'viem';
 import OnChainExpensesABI from './abi/OnChainExpenses.json';
@@ -90,6 +91,9 @@ interface ErrorWithCode extends Error {
   code?: number;
 }
 
+// Add a type for the view state
+type AppView = 'submitExpense' | 'payerDashboard';
+
 function App() {
   // Wallet State
   const [walletAccount, setWalletAccount] = useState<string | null>(null);
@@ -101,6 +105,9 @@ function App() {
       // console.log("Wallet account state in App.tsx:", walletAccount);
     }
   }, [walletAccount]);
+
+  // View State
+  const [currentView, setCurrentView] = useState<AppView>('submitExpense');
 
   // Chain Switcher Hook
   const { currentChainId, switchChain, isSwitching: isChainSwitching, error: chainError, getChainName } = useChainSwitcher();
@@ -128,9 +135,6 @@ function App() {
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [taskIdForProcessing, setTaskIdForProcessing] = useState<string | null>(null);
   const [iappArgs, setIappArgs] = useState<string>('');
-
-  // New state for the current PassetHub expense ID being processed
-  const [currentPassetHubExpenseId, setCurrentPassetHubExpenseId] = useState<bigint | null>(null);
 
   const uploadedReceiptsRef = useRef(uploadedReceipts);
   useEffect(() => {
@@ -672,7 +676,6 @@ function App() {
       
       const passetHubExpenseId = decodedData.args.expenseId; // This is already a bigint
       console.log('Extracted expenseId from Passet Hub:', passetHubExpenseId);
-      setCurrentPassetHubExpenseId(passetHubExpenseId); // Store it
 
       // Now, mark the expense as ready for review on PassetHub
       setSubmissionStep('settingReadyForReviewOnPassetHub');
@@ -771,147 +774,153 @@ function App() {
 
   return (
     <div className="flex flex-col min-h-screen bg-slate-100 text-slate-800 font-sans">
-      <NavBar onWalletConnect={handleWalletConnect} />
+      <NavBar 
+        onWalletConnect={handleWalletConnect} 
+        currentView={currentView} 
+        setCurrentView={setCurrentView} 
+      />
 
       <main className="flex-grow container mx-auto p-4 md:p-6 lg:p-8">
-        <div className="bg-white shadow-xl rounded-lg p-6 md:p-8">
-          <h1 className="text-3xl font-bold text-slate-700 mb-6 text-center">On-Chain Expense Reporter</h1>
+        {currentView === 'submitExpense' ? (
+          <div className="bg-white shadow-xl rounded-lg p-6 md:p-8">
+            <h1 className="text-3xl font-bold text-slate-700 mb-6 text-center">On-Chain Expense Reporter</h1>
 
-          {/* Request Details Section */}
-          <div className="grid md:grid-cols-2 gap-6 mb-8">
-            <div>
-              <label htmlFor="requestAddress" className="block text-sm font-medium text-slate-700">Request To Address</label>
-              <input type="text" id="requestAddress" value={requestAddress} onChange={handleRequestAddressChange} className={inputClass} placeholder="0x123..." disabled={submissionStep !== 'idle' && submissionStep !== 'error'} />
-            </div>
-      <div>
-              <label htmlFor="title" className="block text-sm font-medium text-slate-700">Expense Title</label>
-              <input type="text" id="title" value={title} onChange={(e) => handleTitleChange(e)} className={inputClass} placeholder="e.g., Team Dinner Q3" disabled={submissionStep !== 'idle' && submissionStep !== 'error'} />
-            </div>
-      </div>
-
-          {/* File Upload Section */}
-          <div 
-            className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors duration-200 ease-in-out
-                        ${isDragging ? 'border-sky-500 bg-sky-50' : 'border-slate-300 hover:border-slate-400'}
-                        ${(submissionStep !== 'idle' && submissionStep !== 'error') || isAnyOcrLoading ? 'opacity-70 cursor-not-allowed' : ''}`
-          }
-            onDragOver={(submissionStep === 'idle' || submissionStep === 'error') && !isAnyOcrLoading ? handleDragOver : undefined}
-            onDragEnter={(submissionStep === 'idle' || submissionStep === 'error') && !isAnyOcrLoading ? handleDragEnter : undefined}
-            onDragLeave={(submissionStep === 'idle' || submissionStep === 'error') && !isAnyOcrLoading ? handleDragLeave : undefined}
-            onDrop={(submissionStep === 'idle' || submissionStep === 'error') && !isAnyOcrLoading ? handleDrop : undefined}
-            onClick={() => (submissionStep === 'idle' || submissionStep === 'error') && !isAnyOcrLoading && document.getElementById('fileUpload')?.click()}
-          >
-            <input type="file" id="fileUpload" multiple onChange={handleImageChange} className="hidden" disabled={(submissionStep !== 'idle' && submissionStep !== 'error') || isAnyOcrLoading} />
-            {/* Always show the upload prompt, remove the global spinner from here */}
-            <p className="text-slate-500">Drag & drop receipt images here, or click to select files.</p>
-            {(ocrQueue.length > 0 || currentOcrProcessId) && (
-              <p className="text-xs text-slate-400 mt-2">
-                {ocrQueue.length + (currentOcrProcessId ? 1 : 0)} item(s) currently in OCR process.
-              </p>
-            )}
-          </div>
-
-          {/* Uploaded Receipts Section */}
-          {uploadedReceipts.length > 0 && (
-            <div className="mt-8">
-              <h2 className="text-xl font-semibold text-slate-700 mb-4">Uploaded Receipts</h2>
-              <div className="space-y-4">
-                {uploadedReceipts.map((receipt) => (
-                  <div key={receipt.id} className={`bg-slate-50 p-4 rounded-lg shadow ${(submissionStep !== 'idle' && submissionStep !== 'error') ? 'opacity-70' : ''}`}>
-                    <div className="flex justify-between items-center mb-2">
-                      <h3 className="font-semibold text-slate-600 truncate w-3/4" title={receipt.fileName}>{receipt.fileName}</h3>
-                      <div className="flex items-center space-x-2">
-                        {receipt.isProcessing && (
-                             <svg className="animate-spin h-4 w-4 text-sky-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                             </svg>
-                        )}
-                        <span className="text-sm font-bold text-slate-700">Total: ${receipt.total || '0.00'}</span>
-                        <button onClick={() => (submissionStep === 'idle' || submissionStep === 'error') && handleCollapseToggle(receipt.id)} className={secondaryButtonClass} disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}>
-                          {receipt.isCollapsed ? 'Expand' : 'Collapse'}
-                        </button>
-                        <button onClick={() => (submissionStep === 'idle' || submissionStep === 'error') && handleRemoveReceipt(receipt.id)} className="text-red-500 hover:text-red-700 font-medium text-xs" disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}>Remove</button>
-                      </div>
-                    </div>
-                    {!receipt.isCollapsed && (
-                      <div className="mt-3 border-t border-slate-200 pt-3">
-                        {receipt.ocrFailed ? (
-                          // OCR Failed View
-                          <div>
-                            <p className="text-red-500 font-semibold mb-2">OCR Failed. Please enter details manually.</p>
-                            <div className="mb-4">
-                                <img src={receipt.imageUrl} alt={receipt.fileName} className="max-w-xs max-h-48 rounded border border-slate-300"/>
-                            </div>
-                            <div className="mb-3">
-                                <span className="text-sm font-medium text-slate-700">Currency: </span>
-                                <span className="text-sm text-slate-600">USD (Fixed)</span>
-                            </div>
-
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2 text-xs font-medium text-slate-500">
-                              <div>Item Description</div>
-                              <div>Quantity</div>
-                              <div>Price ($)</div>
-                            </div>
-                            {receipt.itemDetails.map((item) => (
-                              <div key={item.id} className="grid grid-cols-1 md:grid-cols-3 gap-2 items-center mb-1">
-                                <input type="text" value={item.description} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'description', e.target.value)} className={`${inputClass} text-xs p-1`} placeholder="Item name" disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
-                                <input type="text" value={item.quantity} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'quantity', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} placeholder="1" disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
-                                <input type="text" value={item.price} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'price', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} placeholder="0.00" disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
-                              </div>
-                            ))}
-                            <button onClick={() => (submissionStep === 'idle' || submissionStep !== 'error') && handleAddItem(receipt.id)} className={`${secondaryButtonClass} mt-2`} disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}>
-                              Add Item
-                            </button>
-                          </div>
-                        ) : (
-                          // OCR Succeeded or Pending View (Original item display)
-                          <div>
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2 text-xs font-medium text-slate-500">
-                              <div>Item Description</div>
-                              <div>Quantity</div>
-                              <div>Price ($)</div>
-                            </div>
-                            {receipt.itemDetails.map((item) => (
-                              <div key={item.id} className="grid grid-cols-1 md:grid-cols-3 gap-2 items-center mb-1">
-                                <input type="text" value={item.description} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'description', e.target.value)} className={`${inputClass} text-xs p-1`} disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
-                                <input type="text" value={item.quantity} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'quantity', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
-                                <input type="text" value={item.price} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'price', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                         {receipt.extractedText && (
-                            <details className="mt-2 text-xs">
-                                <summary className="cursor-pointer text-slate-400 hover:text-slate-600">View raw OCR text</summary>
-                                <pre className="mt-1 p-2 bg-slate-200 rounded text-slate-600 max-h-32 overflow-auto">{receipt.extractedText}</pre>
-                            </details>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                ))}
+            {/* Request Details Section */}
+            <div className="grid md:grid-cols-2 gap-6 mb-8">
+              <div>
+                <label htmlFor="requestAddress" className="block text-sm font-medium text-slate-700">Request To Address</label>
+                <input type="text" id="requestAddress" value={requestAddress} onChange={handleRequestAddressChange} className={inputClass} placeholder="0x123..." disabled={submissionStep !== 'idle' && submissionStep !== 'error'} />
+              </div>
+              <div>
+                <label htmlFor="title" className="block text-sm font-medium text-slate-700">Expense Title</label>
+                <input type="text" id="title" value={title} onChange={(e) => handleTitleChange(e)} className={inputClass} placeholder="e.g., Team Dinner Q3" disabled={submissionStep !== 'idle' && submissionStep !== 'error'} />
               </div>
             </div>
-          )}
 
-          {/* Grand Total & Submit Section */}
-          {uploadedReceipts.length > 0 && (
-            <div className="mt-10 pt-6 border-t border-slate-200 flex flex-col items-end">
-              <p className="text-2xl font-bold text-slate-700 mb-4">Grand Total: ${grandTotal}</p>
-              <button
-                onClick={submissionStep === 'error' ? () => { setSubmissionStep('idle'); setSubmissionError(null); } : handleSubmitRequest}
-                className={`${buttonClass} w-full md:w-auto`}
-                disabled={isSubmitButtonDisabled()}
-              >
-                {getButtonText()}
-              </button>
-               {!walletAccount && <p className="text-xs text-red-500 mt-1">Wallet not connected.</p>}
-               {submissionError && <p className="text-xs text-red-500 mt-1">Error: {submissionError}</p>}
-               {chainError && !submissionError && <p className="text-xs text-red-500 mt-1">Chain Switch Error: {chainError}</p>}
+            {/* File Upload Section */}
+            <div 
+              className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors duration-200 ease-in-out
+                          ${isDragging ? 'border-sky-500 bg-sky-50' : 'border-slate-300 hover:border-slate-400'}
+                          ${(submissionStep !== 'idle' && submissionStep !== 'error') || isAnyOcrLoading ? 'opacity-70 cursor-not-allowed' : ''}`
+            }
+              onDragOver={(submissionStep === 'idle' || submissionStep === 'error') && !isAnyOcrLoading ? handleDragOver : undefined}
+              onDragEnter={(submissionStep === 'idle' || submissionStep === 'error') && !isAnyOcrLoading ? handleDragEnter : undefined}
+              onDragLeave={(submissionStep === 'idle' || submissionStep === 'error') && !isAnyOcrLoading ? handleDragLeave : undefined}
+              onDrop={(submissionStep === 'idle' || submissionStep === 'error') && !isAnyOcrLoading ? handleDrop : undefined}
+              onClick={() => (submissionStep === 'idle' || submissionStep === 'error') && !isAnyOcrLoading && document.getElementById('fileUpload')?.click()}
+            >
+              <input type="file" id="fileUpload" multiple onChange={handleImageChange} className="hidden" disabled={(submissionStep !== 'idle' && submissionStep !== 'error') || isAnyOcrLoading} />
+              <p className="text-slate-500">Drag & drop receipt images here, or click to select files.</p>
+              {(ocrQueue.length > 0 || currentOcrProcessId) && (
+                <p className="text-xs text-slate-400 mt-2">
+                  {ocrQueue.length + (currentOcrProcessId ? 1 : 0)} item(s) currently in OCR process.
+                </p>
+              )}
             </div>
-          )}
-        </div>
+
+            {/* Uploaded Receipts Section */}
+            {uploadedReceipts.length > 0 && (
+              <div className="mt-8">
+                <h2 className="text-xl font-semibold text-slate-700 mb-4">Uploaded Receipts</h2>
+                <div className="space-y-4">
+                  {uploadedReceipts.map((receipt) => (
+                    <div key={receipt.id} className={`bg-slate-50 p-4 rounded-lg shadow ${(submissionStep !== 'idle' && submissionStep !== 'error') ? 'opacity-70' : ''}`}>
+                      <div className="flex justify-between items-center mb-2">
+                        <h3 className="font-semibold text-slate-600 truncate w-3/4" title={receipt.fileName}>{receipt.fileName}</h3>
+                        <div className="flex items-center space-x-2">
+                          {receipt.isProcessing && (
+                               <svg className="animate-spin h-4 w-4 text-sky-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                               </svg>
+                          )}
+                          <span className="text-sm font-bold text-slate-700">Total: ${receipt.total || '0.00'}</span>
+                          <button onClick={() => (submissionStep === 'idle' || submissionStep === 'error') && handleCollapseToggle(receipt.id)} className={secondaryButtonClass} disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}>
+                            {receipt.isCollapsed ? 'Expand' : 'Collapse'}
+                          </button>
+                          <button onClick={() => (submissionStep === 'idle' || submissionStep === 'error') && handleRemoveReceipt(receipt.id)} className="text-red-500 hover:text-red-700 font-medium text-xs" disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}>
+                           Remove
+                          </button>
+                        </div>
+                      </div>
+                      {!receipt.isCollapsed && (
+                        <div className="mt-3 border-t border-slate-200 pt-3">
+                          {receipt.ocrFailed ? (
+                            <div>
+                              <p className="text-red-500 font-semibold mb-2">OCR Failed. Please enter details manually.</p>
+                              <div className="mb-4">
+                                  <img src={receipt.imageUrl} alt={receipt.fileName} className="max-w-xs max-h-48 rounded border border-slate-300"/>
+                              </div>
+                              <div className="mb-3">
+                                  <span className="text-sm font-medium text-slate-700">Currency: </span>
+                                  <span className="text-sm text-slate-600">USD (Fixed)</span>
+                              </div>
+                              <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2 text-xs font-medium text-slate-500">
+                                <div>Item Description</div>
+                                <div>Quantity</div>
+                                <div>Price ($)</div>
+                              </div>
+                              {receipt.itemDetails.map((item) => (
+                                <div key={item.id} className="grid grid-cols-1 md:grid-cols-3 gap-2 items-center mb-1">
+                                  <input type="text" value={item.description} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'description', e.target.value)} className={`${inputClass} text-xs p-1`} placeholder="Item name" disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
+                                  <input type="text" value={item.quantity} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'quantity', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} placeholder="1" disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
+                                  <input type="text" value={item.price} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'price', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} placeholder="0.00" disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
+                                </div>
+                              ))}
+                              <button onClick={() => (submissionStep === 'idle' || submissionStep !== 'error') && handleAddItem(receipt.id)} className={`${secondaryButtonClass} mt-2`} disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}>
+                                Add Item
+                              </button>
+                            </div>
+                          ) : (
+                            <div>
+                              <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2 text-xs font-medium text-slate-500">
+                                <div>Item Description</div>
+                                <div>Quantity</div>
+                                <div>Price ($)</div>
+                              </div>
+                              {receipt.itemDetails.map((item) => (
+                                <div key={item.id} className="grid grid-cols-1 md:grid-cols-3 gap-2 items-center mb-1">
+                                  <input type="text" value={item.description} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'description', e.target.value)} className={`${inputClass} text-xs p-1`} disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
+                                  <input type="text" value={item.quantity} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'quantity', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
+                                  <input type="text" value={item.price} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'price', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                           {receipt.extractedText && (
+                              <details className="mt-2 text-xs">
+                                  <summary className="cursor-pointer text-slate-400 hover:text-slate-600">View raw OCR text</summary>
+                                  <pre className="mt-1 p-2 bg-slate-200 rounded text-slate-600 max-h-32 overflow-auto">{receipt.extractedText}</pre>
+                              </details>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Grand Total & Submit Section */}
+            {uploadedReceipts.length > 0 && (
+              <div className="mt-10 pt-6 border-t border-slate-200 flex flex-col items-end">
+                <p className="text-2xl font-bold text-slate-700 mb-4">Grand Total: ${grandTotal}</p>
+                <button
+                  onClick={submissionStep === 'error' ? () => { setSubmissionStep('idle'); setSubmissionError(null); } : handleSubmitRequest}
+                  className={`${buttonClass} w-full md:w-auto`}
+                  disabled={isSubmitButtonDisabled()}
+                >
+                  {getButtonText()}
+                </button>
+                 {!walletAccount && <p className="text-xs text-red-500 mt-1">Wallet not connected.</p>}
+                 {submissionError && <p className="text-xs text-red-500 mt-1">Error: {submissionError}</p>}
+                 {chainError && !submissionError && <p className="text-xs text-red-500 mt-1">Chain Switch Error: {chainError}</p>}
+              </div>
+            )}
+          </div>
+        ) : (
+          <PayerDashboard walletAccount={walletAccount} />
+        )}
       </main>
 
       <footer className="text-center p-4 text-xs text-slate-500 border-t border-slate-200 bg-slate-100">
