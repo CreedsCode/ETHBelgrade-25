@@ -1,0 +1,12 @@
+await contract.getExpenseRequest(34)
+await contract.getExpenseRequest(33)
+await contract.getExpenseRequest(32)
+await contract.getExpenseItem(31, 0)
+await contract.getExpenseItem(32, 0)
+await contract.getExpenseItem(34, 0)
+await contract.getExpenseItem(33, 0)
+await contract.getExpenseItem(32, 0)
+await contract.getExpenseRequest(32)
+const contract = await OnChainExpenses.attach("0x3BF50174762538e3111008A38db4Da16C277128F");
+const OnChainExpenses = await ethers.getContractFactory("OnChainExpenses");
+q

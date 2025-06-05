@@ -3,15 +3,15 @@
   "version": "1.0.0",
   "description": "iExec iApp for processing expenses and writing to a smart contract.",
   "main": "src/app.js",
+  "type": "module",
   "scripts": {
-      "start": "node src/app.js"
+    "start": "node src/app.js"
   },
   "dependencies": {
     "@iexec/dataprotector-deserializer": "^0.1.1",
-    "ethers": "^6.13.5",
+    "ethers": "^6.14.3",
     "figlet": "^1.8.1"
   },
-  "devDependencies": {},
   "author": "",
   "license": "MIT"
 }

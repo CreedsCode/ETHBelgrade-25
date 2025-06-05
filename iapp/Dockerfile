@@ -1,5 +1,5 @@
 FROM node:14.4.0-alpine3.11
-WORKDIR /app
+WORKDIR /appAdd commentMore actions
 COPY package*.json ./
 RUN npm ci
 COPY . .

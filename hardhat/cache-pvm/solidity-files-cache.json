@@ -37,8 +37,8 @@
       ]
     },
     "/home/wsl/Development/OnChainExpensing/hardhat/contracts/MockUSDStableCoin.sol": {
-      "lastModificationDate": 1749072767837,
-      "contentHash": "0052dd73f6437e2715733032e6cc60bd",
+      "lastModificationDate": 1749100935137,
+      "contentHash": "f1fee7ba32cc64127a1f60b7ee058792",
       "sourceName": "contracts/MockUSDStableCoin.sol",
       "solcConfig": {
         "version": "0.8.28",
@@ -68,14 +68,14 @@
         "@openzeppelin/contracts/access/Ownable.sol"
       ],
       "versionPragmas": [
-        "^0.8.20"
+        "^0.8.22"
       ],
       "artifacts": [
-        "MockUSDStableCoin"
+        "MyToken"
       ]
     },
     "/home/wsl/Development/OnChainExpensing/hardhat/contracts/OnChainExpenses.sol": {
-      "lastModificationDate": 1749064295658,
+      "lastModificationDate": 1749100935137,
       "contentHash": "5d8c18df5e2a66e01484ef4d4aeeb122",
       "sourceName": "contracts/OnChainExpenses.sol",
       "solcConfig": {
