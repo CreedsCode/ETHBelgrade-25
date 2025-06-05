@@ -23,6 +23,10 @@
   
 </p>
 
+## Video Demo
+
+https://youtube.com/shorts/bckDWpPqLKw?feature=share
+
 ## ✨ Overview
 
 This project is a privacy-first expense submission system designed for DAOs. Users upload receipts, which are sanitized and encrypted via iExec’s DataProtector SDK, then processed in a Trusted Execution Environment (TEE). The iApp decrypts the data securely and submits validated expenses to the Polkadot Asset Hub (testnet). All expenses are also indexed on the OriginTrail decentralized knowledge graph, enabling transparent, composable queries. The system ensures pseudonymous contributors can be reimbursed fairly while protecting against internal bias and favoritism—bringing neutrality, privacy, and auditability to decentralized finance operations.
@@ -43,36 +47,9 @@ This project is a privacy-first expense submission system designed for DAOs. Use
    
 ## Polkadot Passet hub Smart Contract
 
-The project uses a smart contract deployed at `0x3BF50174762538e3111008A38db4Da16C277128F` with the following main functions:
+The project uses a smart contract deployed at `0x3BF50174762538e3111008A38db4Da16C277128F`, and here is the link to our passet hub deployment:"https://blockscout-passet-hub.parity-testnet.parity.io/address/0x3BF50174762538e3111008A38db4Da16C277128F?tab=index"
 
-hardhat/scripts/interact.js:
-const contractAddress = '0xdCE56C2A4926a9fCb09Cb0C2C4394a3168574b29';
-hardhat/ignition/modules/OnChainExpensesModule.js:
-"0x70997970C51812dc3A010C7d01b50e0d17dc79C8", // Fixed iApp address for testing
-JSON (deployment/config):
-iapp/deployed.json:
-"134": "0xD9B5557c036608F12fc19dfe61345B321410B0BD"
-iapp/orders.json:
-"app": "0xD9B5557c036608F12fc19dfe61345B321410B0BD",
-(plus several zero addresses for restrictions)
-iapp/cache/runs.json:
-"iAppAddress": "0x66e70D6E1Ad4bF5bb89D3B42b4Dd90271A86FaC6",
-iapp/cache/deployments.json:
-"appContractAddress": "0x3cE239ba9A9e2C2250093D8d7E5c3Ea9b88C811b",
-"appContractAddress": "0x66e70D6E1Ad4bF5bb89D3B42b4Dd90271A86FaC6",
-iapp/iexec.json:
-"app": "0x3cE239ba9A9e2C2250093D8d7E5c3Ea9b88C811b",
-(plus several zero addresses for restrictions)
-hardhat/ignition/deployments/chain-420420421/deployed_addresses.json:
-"OnChainExpensesModule#MockUSDStableCoin": "0xe58EFf17B8E10C919350C521d3249076cbac338E"
-hardhat/ignition/deployments/chain-420420420/deployed_addresses.json:
-"StorageModule#Storage": "0xE86E5e51b57D83c4420c78eB1bd30453cA2C0a8F",
-"OnChainExpensesModule#MockUSDStableCoin": "0xDa98d56F3357422ba9397F102E8C311Fd3fE004A"
-Other addresses (owners, etc.):
-iapp/cache/deployments.json:
-"owner": "0x71F883581F602c73addf7F57821649470Eab61F5"
-iapp/iexec.json:
-"owner": "0x8B00A47763d5Ce39a9bCd2740077A935a8c61C87"
+Here is our iexec interaction: "https://explorer.iex.ec/bellecour/deal/0x233052d28ba136bac2d6a5ac144ea34196c6141138cbb5fb0440c9de522e73a5"
 
 ## Iexec Iapp
 
