@@ -11,6 +11,8 @@ import { useChainSwitcher } from './hooks/useChainSwitcher'; // Import useChainS
 import { iexec, passetHub } from './utils/viem'; // Import iexec and passetHub chain config
 
 const CONTRACT_ADDRESS = "0x3BF50174762538e3111008A38db4Da16C277128F";
+const IAPP_ADDRESS_PLACEHOLDER = '0x3cE239ba9A9e2C2250093D8d7E5c3Ea9b88C811b'; // FIXME: Replace with your deployed iApp address
+// const AUTHORIZED_USER_FOR_IAPP = '0x0000000000000000000000000000000000000000'; // No longer needed, will use walletAccount
 
 // Removed custom EthereumProvider interface and global Window augmentation
 // Types from viem/EIP-1193 should handle window.ethereum
@@ -70,6 +72,9 @@ type SubmissionStep =
   | 'submittingToPassetHub' 
   | 'switchingToIexec' 
   | 'protectingOnIexec' 
+  | 'grantingAccessOnIexec'
+  | 'processingDataOnIexec'
+  | 'waitingForIexecTaskResult'
   | 'completed' 
   | 'error';
 
@@ -118,7 +123,10 @@ function App() {
   // Submission Flow State
   const [submissionStep, setSubmissionStep] = useState<SubmissionStep>('idle');
   const [preparedDataForProtection, setPreparedDataForProtection] = useState<PreparedDataForProtection | null>(null);
+  const [protectedDataAddress, setProtectedDataAddress] = useState<string | null>(null);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
+  const [taskIdForProcessing, setTaskIdForProcessing] = useState<string | null>(null);
+  const [iappArgs, setIappArgs] = useState<string>('');
 
   const uploadedReceiptsRef = useRef(uploadedReceipts);
   useEffect(() => {
@@ -204,15 +212,8 @@ function App() {
             name: `Expense Report: ${dataTitle} (PassetHub ID: ${expenseId})`, // Clarify origin of ID
           });
           console.log('Data protected on iExec:', protectedDataResult);
-          alert(`Expense submitted (ID: ${expenseId}) and data protected on iExec!\nProtected Data Address: ${protectedDataResult.address}`);
-          
-          setSubmissionStep('completed');
-          setRequestAddress('');
-          setTitle('');
-          setUploadedReceipts([]);
-          setPreparedDataForProtection(null);
-          setSubmissionError(null);
-          setTimeout(() => setSubmissionStep('idle'), 2000);
+          setProtectedDataAddress(protectedDataResult.address);
+          setSubmissionStep('grantingAccessOnIexec');
 
         } catch (protectError) {
           console.error("Error protecting data with iExec DataProtector:", protectError);
@@ -228,14 +229,145 @@ function App() {
           setSubmissionError(message);
           setSubmissionStep('error');
         }
+      } else if (submissionStep === 'grantingAccessOnIexec' && preparedDataForProtection && protectedDataAddress && currentChainId === iexec.id) {
+        if (!dataProtector) {
+          console.warn("DataProtector SDK not yet initialized on Bellecour (for grantAccess). Waiting...");
+          setTimeout(performProtectionSteps, 5000); // Re-check
+          return;
+        }
+        if (!IAPP_ADDRESS_PLACEHOLDER || !IAPP_ADDRESS_PLACEHOLDER.startsWith('0x') || IAPP_ADDRESS_PLACEHOLDER.length !== 42) {
+            console.error("IAPP_ADDRESS_PLACEHOLDER is not a valid Ethereum address. Cannot grant access.", IAPP_ADDRESS_PLACEHOLDER);
+            setSubmissionError("Configuration error: Invalid iApp address configured. Please contact support.");
+            setSubmissionStep('error');
+            return;
+        }
+        if (!walletAccount) { // Check if walletAccount is available
+            console.error("Wallet account not available for grantAccess.");
+            setSubmissionError("Wallet not connected. Please connect your wallet and try again.");
+            setSubmissionStep('error');
+            return;
+        }
+
+        console.log(`Granting access for protected data ${protectedDataAddress} to iApp ${IAPP_ADDRESS_PLACEHOLDER} for user ${walletAccount}...`);
+        try {
+          alert("Please approve the next transaction in MetaMask to grant access to the iApp."); // Proactive alert
+          const grantAccessResult = await dataProtector.core.grantAccess({
+            protectedData: protectedDataAddress as `0x${string}`,
+            authorizedApp: IAPP_ADDRESS_PLACEHOLDER as `0x${string}`,
+            authorizedUser: walletAccount as `0x${string}`, // Use connected wallet account
+            numberOfAccess: 1, // Grant a single access, adjust if needed
+          });
+          console.log('Access granted on iExec (raw result):', JSON.stringify(grantAccessResult, null, 2)); // Log the full object
+          alert(`Expense submitted (PassetHub ID: ${preparedDataForProtection.expenseId}) and data protected (iExec Address: ${protectedDataAddress}).\nAccess granted to iApp for your account.`); // Removed problematic Tx hash for now
+          
+          // All steps successful, now reset and complete
+          const argsForIapp = prompt("Enter any arguments for the iApp (e.g., Telegram Chat ID if your iApp uses it). Leave blank if none.", "");
+          setIappArgs(argsForIapp || '');
+          setSubmissionStep('processingDataOnIexec');
+
+          // Resetting will be done after grantAccess or if grantAccess is skipped/failed
+          // setRequestAddress('');
+          // Don't clear protectedDataAddress here, so user might retry from this point if possible,
+          // or at least has the address if they need to manually grant.
+        } catch (grantAccessError) {
+          console.error("Error granting access with iExec DataProtector:", grantAccessError);
+          let message = `Failed to grant access to iApp.`;
+          if (grantAccessError instanceof Error && (grantAccessError as ErrorWithCode).code === 4001) {
+            message = "Transaction to grant access was rejected in MetaMask. Please try submitting again.";
+          } else if (grantAccessError instanceof Error) {
+            message += ` ${grantAccessError.message}`;
+          } else {
+            message += ` ${String(grantAccessError)}`;
+          }
+          setSubmissionError(message);
+          setSubmissionStep('error');
+          // Don't clear protectedDataAddress here, so user might retry from this point if possible,
+          // or at least has the address if they need to manually grant.
+        }
+      } else if (submissionStep === 'processingDataOnIexec' && preparedDataForProtection && protectedDataAddress && dataProtector && currentChainId === iexec.id) {
+        console.log(`Starting processing for protected data ${protectedDataAddress} with iApp ${IAPP_ADDRESS_PLACEHOLDER} and args: '${iappArgs}'`);
+        try {
+          alert("Please approve the next transaction in MetaMask to start processing your data with the iApp.");
+          const processResponse = await dataProtector.core.processProtectedData({
+            protectedData: protectedDataAddress as `0x${string}`,
+            app: IAPP_ADDRESS_PLACEHOLDER as `0x${string}`,
+            args: iappArgs, 
+            maxPrice: 10, // Max price in nRLC, adjust as needed
+            // secrets: { 1: 'mySecretForApp' } // Example if your app needs secrets
+          });
+          console.log('Data processing started on iExec:', processResponse);
+          setTaskIdForProcessing(processResponse.taskId);
+          alert(`Data processing initiated on iExec!\nTask ID: ${processResponse.taskId}\nTransaction Hash: ${processResponse.txHash}`);
+          setSubmissionStep('waitingForIexecTaskResult');
+        } catch (processError) {
+          console.error("Error starting data processing with iExec DataProtector:", processError);
+          let message = `Failed to start data processing on iExec.`;
+          if (processError instanceof Error && (processError as ErrorWithCode).code === 4001) {
+            message = "Transaction to start data processing was rejected in MetaMask. Please try again.";
+          } else if (processError instanceof Error) {
+            message += ` ${processError.message}`;
+          } else {
+            message += ` ${String(processError)}`;
+          }
+          setSubmissionError(message);
+          setSubmissionStep('error');
+        }
+      } else if (submissionStep === 'waitingForIexecTaskResult' && taskIdForProcessing && dataProtector) {
+        const checkTaskStatus = async () => {
+          console.log(`Checking status for task ID: ${taskIdForProcessing}`);
+          try {
+            // Note: getResultFromCompletedTask throws if task is not complete or failed.
+            // We might need a loop or a way to check task status before calling this if it's too aggressive.
+            // For now, we assume it might take a few tries.
+            const result = await dataProtector.core.getResultFromCompletedTask({ taskId: taskIdForProcessing });
+            console.log('Task completed! Result from iExec:', result); // result is ArrayBuffer (zip file)
+            alert(`iExec task ${taskIdForProcessing} completed successfully! Results are available (see console for ArrayBuffer).`);
+            
+            // Resetting the form and state after successful completion
+            setSubmissionStep('completed');
+            setRequestAddress('');
+            setTitle('');
+            setUploadedReceipts([]);
+            setPreparedDataForProtection(null);
+            setProtectedDataAddress(null);
+            setTaskIdForProcessing(null);
+            setIappArgs('');
+            setSubmissionError(null);
+            setTimeout(() => setSubmissionStep('idle'), 5000); // Longer timeout for completion message
+
+          } catch (taskError) {
+            // This error can mean task is still pending, failed, or other issues.
+            // A more robust solution would inspect the error type/message.
+            if (taskError instanceof Error && taskError.message.includes('Task still pending')) { // Example check, might need refinement
+                 console.warn(`Task ${taskIdForProcessing} is still pending. Retrying in 10 seconds...`);
+                 setTimeout(checkTaskStatus, 10000); // Poll every 10 seconds
+            } else {
+                console.error(`Error fetching result for task ${taskIdForProcessing}:`, taskError);
+                let message = `Failed to get results for iExec task ${taskIdForProcessing}.`;
+                if (taskError instanceof Error) {
+                    message += ` ${taskError.message}`;
+                } else {
+                    message += ` ${String(taskError)}`;
+                }
+                setSubmissionError(message + " You might need to check the iExec Explorer for task status.");
+                setSubmissionStep('error');
+            }
+          }
+        };
+        checkTaskStatus(); // Start polling
       }
     };
 
     // Only run performProtectionSteps if we are in a relevant step
-    if (submissionStep === 'switchingToIexec' || submissionStep === 'protectingOnIexec') {
+    if (submissionStep === 'switchingToIexec' || 
+        submissionStep === 'protectingOnIexec' || 
+        submissionStep === 'grantingAccessOnIexec' ||
+        submissionStep === 'processingDataOnIexec' ||
+        submissionStep === 'waitingForIexecTaskResult'
+    ) {
         performProtectionSteps();
     }
-  }, [submissionStep, preparedDataForProtection, currentChainId, dataProtector, switchChain]);
+  }, [submissionStep, preparedDataForProtection, protectedDataAddress, currentChainId, dataProtector, switchChain, taskIdForProcessing, iappArgs]); // Added taskIdForProcessing and iappArgs to dependencies
 
   const processFiles = async (files: FileList) => {
     const newReceipts: UploadedReceipt[] = Array.from(files).map(file => {
@@ -573,7 +705,12 @@ function App() {
         if (currentChainId !== iexec.id) return `Switch to ${getChainName(iexec.id)} to Protect`;
         if (!dataProtector) return `Initializing on ${getChainName(iexec.id)}...`;
         return 'Protecting Data on iExec...';
-      case 'completed': return 'Submitted & Protected!';
+      case 'grantingAccessOnIexec': return 'Granting Access on iExec...';
+      case 'processingDataOnIexec': return 'Starting Data Processing on iExec...';
+      case 'waitingForIexecTaskResult': 
+        if (taskIdForProcessing) return `Waiting for iExec Task: ${taskIdForProcessing.substring(0,8)}...`;
+        return 'Waiting for iExec Task...';
+      case 'completed': return 'Submitted & Processed!';
       case 'error': return 'Error Occurred - Retry Submission';
       default: return 'Submit Expense Request';
     }
@@ -583,6 +720,9 @@ function App() {
     if (isChainSwitching || !walletAccount || uploadedReceipts.length === 0) return true;
     if (submissionStep === 'submittingToPassetHub' ||
         submissionStep === 'switchingToIexec' ||
+        submissionStep === 'grantingAccessOnIexec' ||
+        submissionStep === 'processingDataOnIexec' ||
+        submissionStep === 'waitingForIexecTaskResult' ||
         submissionStep === 'completed') return true;
     if (submissionStep === 'validatingPassetHub' && currentChainId !== passetHub.id) return true;
     if (submissionStep === 'protectingOnIexec') {
