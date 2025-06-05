@@ -3,8 +3,9 @@ import bodyParser from 'body-parser';
 import DKG from 'dkg.js';
 import { BLOCKCHAIN_IDS } from 'dkg.js/constants';
 import 'dotenv/config';
+import fs from 'fs/promises';
 
-const OT_NODE_HOSTNAME = 'https://v6-pegasus-node-02.origin-trail.network';
+const OT_NODE_HOSTNAME = 'https://v6-pegasus-node-03.origin-trail.network';
 const OT_NODE_PORT = '8900';
 
 function getDkgClient() {
@@ -44,6 +45,19 @@ app.post('/publish', async (req, res) => {
     try {
         console.log('Publishing Knowledge Asset...');
         const result = await publishKnowledgeAsset(content);
+        // Store in local file
+        const assetRecord = { timestamp: new Date().toISOString(), content, result };
+        const filePath = './server/published_assets.json';
+        let assets = [];
+        try {
+            const data = await fs.readFile(filePath, 'utf-8');
+            assets = JSON.parse(data);
+        } catch (e) {
+            // File does not exist or is invalid, start fresh
+            assets = [];
+        }
+        assets.push(assetRecord);
+        await fs.writeFile(filePath, JSON.stringify(assets, null, 2));
         res.status(200).json({ success: true, result });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
@@ -63,6 +77,18 @@ app.post('/query', async (req, res) => {
         res.status(200).json({ success: true, result });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/published-assets', async (req, res) => {
+    const filePath = './server/published_assets.json';
+    try {
+        const data = await fs.readFile(filePath, 'utf-8');
+        const assets = JSON.parse(data);
+        res.status(200).json({ success: true, assets });
+    } catch (e) {
+        // File does not exist or is invalid
+        res.status(200).json({ success: true, assets: [] });
     }
 });
 
