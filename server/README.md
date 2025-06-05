@@ -70,6 +70,14 @@ Tip: You can customize the name and description fields with your own content! Ma
     }'
   ```
 
+### 3. Get All Published Assets
+- **Endpoint:** `GET /published-assets`
+- **Description:** Returns all assets ever published via the API, as stored in the local `published_assets.json` file. Each entry includes the original content, DKG result, and timestamp.
+- **Sample curl:**
+  ```sh
+  curl http://localhost:3000/published-assets
+  ```
+
 ## Notes
 - Make sure your private key has sufficient permissions and funds for publishing assets on the selected network.
 - You can change the port by setting the `PORT` environment variable. 
