@@ -33,6 +33,8 @@ API server listening on port 3000
 
 ## API Endpoints
 
+Tip: You can customize the name and description fields with your own content! Make sure to also change the last part of the @id (e.g., from "hello-dkg" to "my-asset-name") to keep your asset unique for querying later!
+
 ### 1. Publish Knowledge Asset
 - **Endpoint:** `POST /publish`
 - **Description:** Publishes a knowledge asset to the DKG.
