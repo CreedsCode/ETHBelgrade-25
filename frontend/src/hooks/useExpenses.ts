@@ -1,5 +1,5 @@
 import { parseEther } from 'viem';
-import { getWalletClient } from '../utils/viem';
+import { getWalletClient, publicClient } from '../utils/viem';
 import OnChainExpensesABI from '../abi/OnChainExpenses.json';
 import ERC20ABI from '../abi/ERC20.json';
 
@@ -27,7 +27,7 @@ export function useExpenses() {
   };
 
   // Mark expense as ready for review
-  const setReadyForReview = async (expenseId: number) => {
+  const setReadyForReview = async (expenseId: bigint) => {
     try {
       const walletClient = await getWalletClient();
       
@@ -35,7 +35,7 @@ export function useExpenses() {
         address: CONTRACT_ADDRESS as `0x${string}`,
         abi: OnChainExpensesABI,
         functionName: 'setReadyForReview',
-        args: [BigInt(expenseId)],
+        args: [expenseId],
       });
 
       return hash;
@@ -65,7 +65,7 @@ export function useExpenses() {
   };
 
   // Batch pay items
-  const batchPayItems = async (expenseId: number, itemIds: number[], totalAmount: string) => {
+  const batchPayItems = async (expenseId: bigint, itemIds: bigint[], totalAmount: string) => {
     try {
       const walletClient = await getWalletClient();
       
@@ -78,8 +78,8 @@ export function useExpenses() {
         abi: OnChainExpensesABI,
         functionName: 'batchPayItems',
         args: [
-          BigInt(expenseId),
-          itemIds.map(id => BigInt(id)),
+          expenseId,
+          itemIds,
           parseEther(totalAmount)
         ],
       });
@@ -91,9 +91,91 @@ export function useExpenses() {
     }
   };
 
+  // --- Getter Functions ---
+
+  const getExpenseRequest = async (expenseId: bigint) => {
+    try {
+      const data = await publicClient.readContract({
+        address: CONTRACT_ADDRESS as `0x${string}`,
+        abi: OnChainExpensesABI,
+        functionName: 'getExpenseRequest',
+        args: [expenseId],
+      });
+      return data;
+    } catch (error) {
+      console.error('Error fetching expense request:', error);
+      throw error;
+    }
+  };
+
+  const getAllExpenseItems = async (expenseId: bigint) => {
+    try {
+      const data = await publicClient.readContract({
+        address: CONTRACT_ADDRESS as `0x${string}`,
+        abi: OnChainExpensesABI,
+        functionName: 'getAllExpenseItems',
+        args: [expenseId],
+      });
+      return data;
+    } catch (error) {
+      console.error('Error fetching all expense items:', error);
+      throw error;
+    }
+  };
+
+  const getExpensesReadyForReview = async (payerAddress: string) => {
+    try {
+      const data = await publicClient.readContract({
+        address: CONTRACT_ADDRESS as `0x${string}`,
+        abi: OnChainExpensesABI,
+        functionName: 'getExpensesReadyForReview',
+        args: [payerAddress as `0x${string}`],
+      });
+      return data;
+    } catch (error) {
+      console.error('Error fetching expenses ready for review:', error);
+      throw error;
+    }
+  };
+
+  const getCreatorExpenses = async (creatorAddress: string) => {
+    try {
+      const data = await publicClient.readContract({
+        address: CONTRACT_ADDRESS as `0x${string}`,
+        abi: OnChainExpensesABI,
+        functionName: 'getCreatorExpenses',
+        args: [creatorAddress as `0x${string}`],
+      });
+      return data;
+    } catch (error) {
+      console.error('Error fetching creator expenses:', error);
+      throw error;
+    }
+  };
+
+  const getUnpaidTotal = async (expenseId: bigint) => {
+    try {
+      const data = await publicClient.readContract({
+        address: CONTRACT_ADDRESS as `0x${string}`,
+        abi: OnChainExpensesABI,
+        functionName: 'getUnpaidTotal',
+        args: [expenseId],
+      });
+      return data;
+    } catch (error) {
+      console.error('Error fetching unpaid total:', error);
+      throw error;
+    }
+  };
+
   return {
     createExpenseRequest,
     setReadyForReview,
     batchPayItems,
+    getExpenseRequest,
+    getAllExpenseItems,
+    getExpensesReadyForReview,
+    getCreatorExpenses,
+    getUnpaidTotal,
   };
 } 

@@ -11,7 +11,7 @@ import { useChainSwitcher } from './hooks/useChainSwitcher'; // Import useChainS
 import { iexec, passetHub } from './utils/viem'; // Import iexec and passetHub chain config
 
 const CONTRACT_ADDRESS = "0x3BF50174762538e3111008A38db4Da16C277128F";
-const IAPP_ADDRESS_PLACEHOLDER = '0x3cE239ba9A9e2C2250093D8d7E5c3Ea9b88C811b'; // FIXME: Replace with your deployed iApp address
+const IAPP_ADDRESS_PLACEHOLDER = '0x168653BCaeb3596bb9Ad5FB90E1Ee77473a7Fb0e'; // FIXME: Replace with your deployed iApp address
 // const AUTHORIZED_USER_FOR_IAPP = '0x0000000000000000000000000000000000000000'; // No longer needed, will use walletAccount
 
 // Removed custom EthereumProvider interface and global Window augmentation
@@ -70,6 +70,7 @@ type SubmissionStep =
   | 'idle' 
   | 'validatingPassetHub'
   | 'submittingToPassetHub' 
+  | 'settingReadyForReviewOnPassetHub'
   | 'switchingToIexec' 
   | 'protectingOnIexec' 
   | 'grantingAccessOnIexec'
@@ -79,7 +80,7 @@ type SubmissionStep =
   | 'error';
 
 interface PreparedDataForProtection {
-  expenseId: number;
+  expenseId: bigint;
   dataToProtect: DataObject;
   title: string;
 }
@@ -128,6 +129,9 @@ function App() {
   const [taskIdForProcessing, setTaskIdForProcessing] = useState<string | null>(null);
   const [iappArgs, setIappArgs] = useState<string>('');
 
+  // New state for the current PassetHub expense ID being processed
+  const [currentPassetHubExpenseId, setCurrentPassetHubExpenseId] = useState<bigint | null>(null);
+
   const uploadedReceiptsRef = useRef(uploadedReceipts);
   useEffect(() => {
     uploadedReceiptsRef.current = uploadedReceipts;
@@ -164,9 +168,13 @@ function App() {
   useEffect(() => {
     if (walletAccount && window.ethereum && currentChainId === iexec.id) {
       try {
-        const protector = new IExecDataProtector(window.ethereum);
+        const protector = new IExecDataProtector(window.ethereum, {
+          iexecOptions: {
+            smsURL: 'https://sms.labs.iex.ec',
+          },
+        });
         setDataProtector(protector);
-        console.log("iExec DataProtector SDK instantiated successfully on Bellecour chain.");
+        console.log("iExec DataProtector SDK instantiated successfully on Bellecour chain with custom SMS URL.");
       } catch (error) {
         console.error("Failed to instantiate iExec DataProtector SDK:", error);
         setDataProtector(null);
@@ -257,7 +265,7 @@ function App() {
             authorizedUser: walletAccount as `0x${string}`, // Use connected wallet account
             numberOfAccess: 1, // Grant a single access, adjust if needed
           });
-          console.log('Access granted on iExec (raw result):', JSON.stringify(grantAccessResult, null, 2)); // Log the full object
+          console.log('Access granted on iExec (raw result):', JSON.stringify( grantAccessResult, null, 2)); // Log the full object
           alert(`Expense submitted (PassetHub ID: ${preparedDataForProtection.expenseId}) and data protected (iExec Address: ${protectedDataAddress}).\nAccess granted to iApp for your account.`); // Removed problematic Tx hash for now
           
           // All steps successful, now reset and complete
@@ -291,8 +299,9 @@ function App() {
           const processResponse = await dataProtector.core.processProtectedData({
             protectedData: protectedDataAddress as `0x${string}`,
             app: IAPP_ADDRESS_PLACEHOLDER as `0x${string}`,
-            args: iappArgs, 
-            maxPrice: 10, // Max price in nRLC, adjust as needed
+            args: iappArgs,
+            workerpool: "tdx-labs.pools.iexec.eth", 
+            maxPrice: 0, // Max price in nRLC, adjust as needed
             // secrets: { 1: 'mySecretForApp' } // Example if your app needs secrets
           });
           console.log('Data processing started on iExec:', processResponse);
@@ -565,7 +574,7 @@ function App() {
   const handleRequestAddressChange = (event: ChangeEvent<HTMLInputElement>) => setRequestAddress(event.target.value);
   const handleTitleChange = (event: ChangeEvent<HTMLInputElement>) => setTitle(event.target.value);
   
-  const { createExpenseRequest } = useExpenses();
+  const { createExpenseRequest, setReadyForReview } = useExpenses();
 
   const handleSubmitRequest = async () => {
     setSubmissionError(null); // Clear previous errors
@@ -661,11 +670,35 @@ function App() {
 
       if (!decodedData.args || typeof decodedData.args.expenseId === 'undefined') throw new Error('Failed to decode expenseId from Passet Hub event');
       
-      const expenseId = Number(decodedData.args.expenseId);
-      console.log('Extracted expenseId from Passet Hub:', expenseId);
+      const passetHubExpenseId = decodedData.args.expenseId; // This is already a bigint
+      console.log('Extracted expenseId from Passet Hub:', passetHubExpenseId);
+      setCurrentPassetHubExpenseId(passetHubExpenseId); // Store it
+
+      // Now, mark the expense as ready for review on PassetHub
+      setSubmissionStep('settingReadyForReviewOnPassetHub');
+      try {
+        if (!setReadyForReview) { // Guard clause if hook is not updated
+          throw new Error("setReadyForReview function is not available from useExpenses hook. Please update the hook.");
+        }
+        console.log(`Calling setReadyForReview for expense ID: ${passetHubExpenseId}`);
+        alert("Please approve the transaction in MetaMask to mark your expense as 'Ready for Review' on Passet Hub."); // Proactive alert
+        const setReadyHash = await setReadyForReview(passetHubExpenseId);
+        console.log('setReadyForReview transaction hash:', setReadyHash);
+        
+        // Wait for confirmation (optional, but good for UX)
+        alert(`Expense (ID: ${passetHubExpenseId}) marked as 'Ready for Review' on Passet Hub. Tx: ${setReadyHash.substring(0,10)}...`);
+
+      } catch (reviewError) {
+        console.error("Error marking expense as ready for review:", reviewError);
+        setSubmissionError(`Failed to mark expense as ready for review on Passet Hub: ${reviewError instanceof Error ? reviewError.message : String(reviewError)}\n You may need to do this manually later.`);
+        // Decide if you want to stop the whole flow or continue to iExec protection
+        // For now, we'll let it continue to iExec but with an error message.
+        // setSubmissionStep('error'); // Option: halt on this error
+        // return; 
+      }
 
       const dataToProtect: DataObject = {
-        expenseId: expenseId.toString(), // Ensure primitive types for top-level keys if possible
+        expenseId: passetHubExpenseId.toString(), // Use the bigint converted to string
         title,
         payer: requestAddress,
         totalAmount: grandTotal,
@@ -675,8 +708,8 @@ function App() {
           items: receipt.itemDetails.map(item => ({ description: item.description, quantity: item.quantity, price: item.price }))
         })))
       } as unknown as DataObject;
-
-      setPreparedDataForProtection({ expenseId, dataToProtect, title });
+      console.log("Data to protect:", dataToProtect);
+      setPreparedDataForProtection({ expenseId: passetHubExpenseId, dataToProtect, title });
       setSubmissionStep('switchingToIexec'); // Trigger next phase via useEffect
 
     } catch (error) {
@@ -700,6 +733,7 @@ function App() {
         if (currentChainId !== passetHub.id) return `Switch to ${getChainName(passetHub.id)} to Submit`;
         return 'Validating...';
       case 'submittingToPassetHub': return 'Submitting to Passet Hub...';
+      case 'settingReadyForReviewOnPassetHub': return 'Marking Ready for Review (Passet Hub)...';
       case 'switchingToIexec': return 'Switching to iExec Bellecour...';
       case 'protectingOnIexec': 
         if (currentChainId !== iexec.id) return `Switch to ${getChainName(iexec.id)} to Protect`;
@@ -719,6 +753,7 @@ function App() {
   const isSubmitButtonDisabled = () => {
     if (isChainSwitching || !walletAccount || uploadedReceipts.length === 0) return true;
     if (submissionStep === 'submittingToPassetHub' ||
+        submissionStep === 'settingReadyForReviewOnPassetHub' ||
         submissionStep === 'switchingToIexec' ||
         submissionStep === 'grantingAccessOnIexec' ||
         submissionStep === 'processingDataOnIexec' ||
