@@ -1,108 +1,377 @@
-import React, { useState, useEffect, useRef } from 'react';
-import Tesseract from 'tesseract.js';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import type { ChangeEvent, DragEvent } from 'react'; // Type-only imports
+import Tesseract from 'tesseract.js'; 
+import type { RecognizeResult, LoggerMessage } from 'tesseract.js'; // Added LoggerMessage
+import NavBar from './components/NavBar'; // For Wallet Integration
+import { useExpenses } from './hooks/useExpenses';
+import { decodeEventLog, type Log, type TransactionReceipt, type Hash, type Hex, encodeEventTopics } from 'viem';
+import OnChainExpensesABI from './abi/OnChainExpenses.json';
+import { IExecDataProtector, type DataObject } from '@iexec/dataprotector'; // Added iExec DataProtector import
+import { useChainSwitcher } from './hooks/useChainSwitcher'; // Import useChainSwitcher
+import { iexec, passetHub } from './utils/viem'; // Import iexec and passetHub chain config
 
-// Content from your App.css
-const appGlobalStyles = `
-  .App {
-    text-align: center;
-  }
+const CONTRACT_ADDRESS = "0x3BF50174762538e3111008A38db4Da16C277128F";
+const IAPP_ADDRESS_PLACEHOLDER = '0x3cE239ba9A9e2C2250093D8d7E5c3Ea9b88C811b'; // FIXME: Replace with your deployed iApp address
+// const AUTHORIZED_USER_FOR_IAPP = '0x0000000000000000000000000000000000000000'; // No longer needed, will use walletAccount
 
-  .App-logo {
-    height: 40vmin;
-    pointer-events: none;
-  }
+// Removed custom EthereumProvider interface and global Window augmentation
+// Types from viem/EIP-1193 should handle window.ethereum
 
-  @media (prefers-reduced-motion: no-preference) {
-    .App-logo {
-      animation: App-logo-spin infinite 20s linear;
-    }
-  }
+interface BlockscoutLog {
+  address: {
+    hash: string;
+  };
+  block_hash: string;
+  block_number: number;
+  data: string;
+  index: number;
+  topics: string[];
+  transaction_hash: string;
+}
 
-  .App-header {
-    background-color: #282c34;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    font-size: calc(10px + 2vmin);
-    color: white;
-  }
+interface BlockscoutResponse {
+  items: BlockscoutLog[];
+}
 
-  .App-link {
-    color: #61dafb;
-  }
+// Define types for better maintainability
+interface ReceiptItem {
+  id: string;
+  description: string;
+  quantity: string; // Or number, if strictly numeric
+  price: string;    // Or number
+}
 
-  @keyframes App-logo-spin {
-    from {
-      transform: rotate(0deg);
-    }
-    to {
-      transform: rotate(360deg);
-    }
-  }
-`;
+interface UploadedReceipt {
+  id: string;
+  fileName: string;
+  imageUrl: string;
+  total: string; // Or number, if strictly numeric
+  itemDetails: ReceiptItem[];
+  isCollapsed: boolean;
+  isProcessing: boolean;
+  extractedText?: string; // Store raw extracted text for debugging or re-parsing
+  ocrFailed?: boolean; // Flag to indicate OCR failure
+}
+
+type OcrQueueItem = string; // Just the ID
+
+interface ExpenseCreatedEvent {
+  eventName: 'ExpenseCreated';
+  args: {
+    expenseId: bigint;
+    creator: `0x${string}`;
+    payer: `0x${string}`;
+    title: string;
+  };
+}
+
+// Define types for submission steps and data for protection
+type SubmissionStep = 
+  | 'idle' 
+  | 'validatingPassetHub'
+  | 'submittingToPassetHub' 
+  | 'switchingToIexec' 
+  | 'protectingOnIexec' 
+  | 'grantingAccessOnIexec'
+  | 'processingDataOnIexec'
+  | 'waitingForIexecTaskResult'
+  | 'completed' 
+  | 'error';
+
+interface PreparedDataForProtection {
+  expenseId: number;
+  dataToProtect: DataObject;
+  title: string;
+}
+
+// Interface for errors that might have a code property
+interface ErrorWithCode extends Error {
+  code?: number;
+}
 
 function App() {
+  // Wallet State
+  const [walletAccount, setWalletAccount] = useState<string | null>(null);
+  const handleWalletConnect = useCallback((account: string) => {
+    setWalletAccount(account);
+  }, []);
+   useEffect(() => {
+    if (walletAccount) {
+      // console.log("Wallet account state in App.tsx:", walletAccount);
+    }
+  }, [walletAccount]);
+
+  // Chain Switcher Hook
+  const { currentChainId, switchChain, isSwitching: isChainSwitching, error: chainError, getChainName } = useChainSwitcher();
+
   // State for the main form inputs
-  const [requestAddress, setRequestAddress] = useState('');
-  const [title, setTitle] = useState('');
+  const [requestAddress, setRequestAddress] = useState<string>('');
+  const [title, setTitle] = useState<string>('');
 
-  // New state to hold multiple receipts and their OCR data
-  // Each object: { id, fileName, imageUrl, total, itemDetails, isCollapsed, isProcessing }
-  const [uploadedReceipts, setUploadedReceipts] = useState([]);
-
-  // OCR Queue States
-  const [ocrQueue, setOcrQueue] = useState([]); // Stores IDs of receipts waiting for OCR
-  const [currentOcrProcessId, setCurrentOcrProcessId] = useState(null); // ID of receipt currently undergoing OCR
+  // Receipts and OCR Queue
+  const [uploadedReceipts, setUploadedReceipts] = useState<UploadedReceipt[]>([]);
+  const [ocrQueue, setOcrQueue] = useState<OcrQueueItem[]>([]);
+  const [currentOcrProcessId, setCurrentOcrProcessId] = useState<string | null>(null);
 
   // UI related states
-  const [isDragging, setIsDragging] = useState(false);
-  // isAnyOcrLoading derived from currentOcrProcessId (true if any OCR is actively running)
+  const [isDragging, setIsDragging] = useState<boolean>(false);
   const isAnyOcrLoading = !!currentOcrProcessId;
 
-  // Ref to hold the latest uploadedReceipts state values in performOCR
+  // iExec DataProtector SDK instance
+  const [dataProtector, setDataProtector] = useState<IExecDataProtector | null>(null);
+
+  // Submission Flow State
+  const [submissionStep, setSubmissionStep] = useState<SubmissionStep>('idle');
+  const [preparedDataForProtection, setPreparedDataForProtection] = useState<PreparedDataForProtection | null>(null);
+  const [protectedDataAddress, setProtectedDataAddress] = useState<string | null>(null);
+  const [submissionError, setSubmissionError] = useState<string | null>(null);
+  const [taskIdForProcessing, setTaskIdForProcessing] = useState<string | null>(null);
+  const [iappArgs, setIappArgs] = useState<string>('');
+
   const uploadedReceiptsRef = useRef(uploadedReceipts);
   useEffect(() => {
     uploadedReceiptsRef.current = uploadedReceipts;
   }, [uploadedReceipts]);
 
-
-  // Calculate the grand total of all receipts
   const grandTotal = uploadedReceipts.reduce((sum, receipt) => {
-    // Ensure receipt.total is a number and clean it (e.g., remove '$')
-    const receiptTotal = parseFloat(receipt.total?.replace('$', '') || 0);
+    const receiptTotal = parseFloat(receipt.total?.replace('$', '').replace(',', '.') || '0');
     return sum + receiptTotal;
   }, 0).toFixed(2);
 
-  // --- useEffect to manage the OCR queue ---
   useEffect(() => {
-    // If no OCR is currently running AND there are items in the queue
     if (!currentOcrProcessId && ocrQueue.length > 0) {
-      const nextReceiptId = ocrQueue[0]; // Get the next ID from the queue
+      const nextReceiptId = ocrQueue[0];
+      const receiptToProcess = uploadedReceipts.find(r => r.id === nextReceiptId);
 
-      // Find the receipt object to get its image URL
-      const receiptToProcess = uploadedReceiptsRef.current.find(r => r.id === nextReceiptId);
-
-      if (receiptToProcess) {
-        // Mark this receipt as currently undergoing OCR
+      if (receiptToProcess && receiptToProcess.imageUrl) {
         setUploadedReceipts(prev => prev.map(r =>
           r.id === nextReceiptId ? { ...r, isProcessing: true } : r
         ));
-        setCurrentOcrProcessId(nextReceiptId); // Set the current OCR ID
-        // Start OCR for this receipt
+        setCurrentOcrProcessId(nextReceiptId);
         performOCR(nextReceiptId, receiptToProcess.imageUrl);
       } else {
-        // If for some reason the receipt isn't found in current state, remove it from queue
-        setOcrQueue(prev => prev.slice(1));
+        if (!receiptToProcess) {
+          console.warn(`Receipt ID ${nextReceiptId} in OCR queue but not found in uploadedReceipts. Removing from queue.`);
+        } else {
+          console.warn(`Receipt ID ${nextReceiptId} found but missing imageUrl. Removing from queue.`);
+        }
+        setOcrQueue(prev => prev.filter(id => id !== nextReceiptId));
       }
     }
-  }, [ocrQueue, currentOcrProcessId]); // Depend on queue and current processing ID
+  }, [ocrQueue, currentOcrProcessId, uploadedReceipts]);
 
-  // Handle multiple file processing
-  const processFiles = async (files) => {
-    const newReceipts = Array.from(files).map(file => {
-      const id = Date.now() + Math.random(); // Simple unique ID
+  // Initialize iExec DataProtector SDK when wallet is connected AND on the correct chain (Bellecour)
+  useEffect(() => {
+    if (walletAccount && window.ethereum && currentChainId === iexec.id) {
+      try {
+        const protector = new IExecDataProtector(window.ethereum);
+        setDataProtector(protector);
+        console.log("iExec DataProtector SDK instantiated successfully on Bellecour chain.");
+      } catch (error) {
+        console.error("Failed to instantiate iExec DataProtector SDK:", error);
+        setDataProtector(null);
+      }
+    } else {
+      setDataProtector(null);
+      if (walletAccount && currentChainId !== iexec.id) {
+        console.warn(`Wallet connected, but not on iExec Bellecour chain (current: ${currentChainId}). DataProtector SDK not initialized.`);
+      }
+    }
+  }, [walletAccount, currentChainId]); // Add currentChainId as a dependency
+
+  // Effect for handling steps after PassetHub submission (chain switch and iExec protection)
+  useEffect(() => {
+    const performProtectionSteps = async () => {
+      if (submissionStep === 'switchingToIexec' && preparedDataForProtection) {
+        if (currentChainId !== iexec.id) {
+          console.log("Attempting to switch to iExec Bellecour for data protection...");
+          try {
+            await switchChain(iexec.id);
+          } catch (err) {
+            console.error("Error during switch to iExec Bellecour:", err);
+            setSubmissionError("Failed to switch to iExec Bellecour. Please switch manually and try again.");
+            setSubmissionStep('error');
+          }
+        } else {
+          console.log("Successfully on iExec Bellecour. Proceeding to protection step.");
+          setSubmissionStep('protectingOnIexec');
+        }
+      } else if (submissionStep === 'protectingOnIexec' && preparedDataForProtection && currentChainId === iexec.id) {
+        if (!dataProtector) {
+          console.warn("DataProtector SDK not yet initialized on Bellecour. Waiting...");
+          setTimeout(performProtectionSteps, 30000); // Re-check in 10s
+          return;
+        }
+
+        console.log("DataProtector SDK ready. Protecting data on iExec Bellecour...");
+        try {
+          const { dataToProtect, title: dataTitle, expenseId } = preparedDataForProtection;
+          alert("Please approve the next transaction in MetaMask to protect your expense data on the iExec network."); // Proactive alert
+          const protectedDataResult = await dataProtector.core.protectData({
+            data: dataToProtect,
+            name: `Expense Report: ${dataTitle} (PassetHub ID: ${expenseId})`, // Clarify origin of ID
+          });
+          console.log('Data protected on iExec:', protectedDataResult);
+          setProtectedDataAddress(protectedDataResult.address);
+          setSubmissionStep('grantingAccessOnIexec');
+
+        } catch (protectError) {
+          console.error("Error protecting data with iExec DataProtector:", protectError);
+          let message = `Data protection on iExec FAILED.`;
+          // Type assertion to ErrorWithCode to safely access .code
+          if (protectError instanceof Error && (protectError as ErrorWithCode).code === 4001) {
+            message = "Transaction to protect data was rejected in MetaMask. Please try submitting again and approve the transaction.";
+          } else if (protectError instanceof Error) {
+            message += ` ${protectError.message}`;
+          } else {
+            message += ` ${String(protectError)}`;
+          }
+          setSubmissionError(message);
+          setSubmissionStep('error');
+        }
+      } else if (submissionStep === 'grantingAccessOnIexec' && preparedDataForProtection && protectedDataAddress && currentChainId === iexec.id) {
+        if (!dataProtector) {
+          console.warn("DataProtector SDK not yet initialized on Bellecour (for grantAccess). Waiting...");
+          setTimeout(performProtectionSteps, 5000); // Re-check
+          return;
+        }
+        if (!IAPP_ADDRESS_PLACEHOLDER || !IAPP_ADDRESS_PLACEHOLDER.startsWith('0x') || IAPP_ADDRESS_PLACEHOLDER.length !== 42) {
+            console.error("IAPP_ADDRESS_PLACEHOLDER is not a valid Ethereum address. Cannot grant access.", IAPP_ADDRESS_PLACEHOLDER);
+            setSubmissionError("Configuration error: Invalid iApp address configured. Please contact support.");
+            setSubmissionStep('error');
+            return;
+        }
+        if (!walletAccount) { // Check if walletAccount is available
+            console.error("Wallet account not available for grantAccess.");
+            setSubmissionError("Wallet not connected. Please connect your wallet and try again.");
+            setSubmissionStep('error');
+            return;
+        }
+
+        console.log(`Granting access for protected data ${protectedDataAddress} to iApp ${IAPP_ADDRESS_PLACEHOLDER} for user ${walletAccount}...`);
+        try {
+          alert("Please approve the next transaction in MetaMask to grant access to the iApp."); // Proactive alert
+          const grantAccessResult = await dataProtector.core.grantAccess({
+            protectedData: protectedDataAddress as `0x${string}`,
+            authorizedApp: IAPP_ADDRESS_PLACEHOLDER as `0x${string}`,
+            authorizedUser: walletAccount as `0x${string}`, // Use connected wallet account
+            numberOfAccess: 1, // Grant a single access, adjust if needed
+          });
+          console.log('Access granted on iExec (raw result):', JSON.stringify(grantAccessResult, null, 2)); // Log the full object
+          alert(`Expense submitted (PassetHub ID: ${preparedDataForProtection.expenseId}) and data protected (iExec Address: ${protectedDataAddress}).\nAccess granted to iApp for your account.`); // Removed problematic Tx hash for now
+          
+          // All steps successful, now reset and complete
+          const argsForIapp = prompt("Enter any arguments for the iApp (e.g., Telegram Chat ID if your iApp uses it). Leave blank if none.", "");
+          setIappArgs(argsForIapp || '');
+          setSubmissionStep('processingDataOnIexec');
+
+          // Resetting will be done after grantAccess or if grantAccess is skipped/failed
+          // setRequestAddress('');
+          // Don't clear protectedDataAddress here, so user might retry from this point if possible,
+          // or at least has the address if they need to manually grant.
+        } catch (grantAccessError) {
+          console.error("Error granting access with iExec DataProtector:", grantAccessError);
+          let message = `Failed to grant access to iApp.`;
+          if (grantAccessError instanceof Error && (grantAccessError as ErrorWithCode).code === 4001) {
+            message = "Transaction to grant access was rejected in MetaMask. Please try submitting again.";
+          } else if (grantAccessError instanceof Error) {
+            message += ` ${grantAccessError.message}`;
+          } else {
+            message += ` ${String(grantAccessError)}`;
+          }
+          setSubmissionError(message);
+          setSubmissionStep('error');
+          // Don't clear protectedDataAddress here, so user might retry from this point if possible,
+          // or at least has the address if they need to manually grant.
+        }
+      } else if (submissionStep === 'processingDataOnIexec' && preparedDataForProtection && protectedDataAddress && dataProtector && currentChainId === iexec.id) {
+        console.log(`Starting processing for protected data ${protectedDataAddress} with iApp ${IAPP_ADDRESS_PLACEHOLDER} and args: '${iappArgs}'`);
+        try {
+          alert("Please approve the next transaction in MetaMask to start processing your data with the iApp.");
+          const processResponse = await dataProtector.core.processProtectedData({
+            protectedData: protectedDataAddress as `0x${string}`,
+            app: IAPP_ADDRESS_PLACEHOLDER as `0x${string}`,
+            args: iappArgs, 
+            maxPrice: 10, // Max price in nRLC, adjust as needed
+            // secrets: { 1: 'mySecretForApp' } // Example if your app needs secrets
+          });
+          console.log('Data processing started on iExec:', processResponse);
+          setTaskIdForProcessing(processResponse.taskId);
+          alert(`Data processing initiated on iExec!\nTask ID: ${processResponse.taskId}\nTransaction Hash: ${processResponse.txHash}`);
+          setSubmissionStep('waitingForIexecTaskResult');
+        } catch (processError) {
+          console.error("Error starting data processing with iExec DataProtector:", processError);
+          let message = `Failed to start data processing on iExec.`;
+          if (processError instanceof Error && (processError as ErrorWithCode).code === 4001) {
+            message = "Transaction to start data processing was rejected in MetaMask. Please try again.";
+          } else if (processError instanceof Error) {
+            message += ` ${processError.message}`;
+          } else {
+            message += ` ${String(processError)}`;
+          }
+          setSubmissionError(message);
+          setSubmissionStep('error');
+        }
+      } else if (submissionStep === 'waitingForIexecTaskResult' && taskIdForProcessing && dataProtector) {
+        const checkTaskStatus = async () => {
+          console.log(`Checking status for task ID: ${taskIdForProcessing}`);
+          try {
+            // Note: getResultFromCompletedTask throws if task is not complete or failed.
+            // We might need a loop or a way to check task status before calling this if it's too aggressive.
+            // For now, we assume it might take a few tries.
+            const result = await dataProtector.core.getResultFromCompletedTask({ taskId: taskIdForProcessing });
+            console.log('Task completed! Result from iExec:', result); // result is ArrayBuffer (zip file)
+            alert(`iExec task ${taskIdForProcessing} completed successfully! Results are available (see console for ArrayBuffer).`);
+            
+            // Resetting the form and state after successful completion
+            setSubmissionStep('completed');
+            setRequestAddress('');
+            setTitle('');
+            setUploadedReceipts([]);
+            setPreparedDataForProtection(null);
+            setProtectedDataAddress(null);
+            setTaskIdForProcessing(null);
+            setIappArgs('');
+            setSubmissionError(null);
+            setTimeout(() => setSubmissionStep('idle'), 5000); // Longer timeout for completion message
+
+          } catch (taskError) {
+            // This error can mean task is still pending, failed, or other issues.
+            // A more robust solution would inspect the error type/message.
+            if (taskError instanceof Error && taskError.message.includes('Task still pending')) { // Example check, might need refinement
+                 console.warn(`Task ${taskIdForProcessing} is still pending. Retrying in 10 seconds...`);
+                 setTimeout(checkTaskStatus, 10000); // Poll every 10 seconds
+            } else {
+                console.error(`Error fetching result for task ${taskIdForProcessing}:`, taskError);
+                let message = `Failed to get results for iExec task ${taskIdForProcessing}.`;
+                if (taskError instanceof Error) {
+                    message += ` ${taskError.message}`;
+                } else {
+                    message += ` ${String(taskError)}`;
+                }
+                setSubmissionError(message + " You might need to check the iExec Explorer for task status.");
+                setSubmissionStep('error');
+            }
+          }
+        };
+        checkTaskStatus(); // Start polling
+      }
+    };
+
+    // Only run performProtectionSteps if we are in a relevant step
+    if (submissionStep === 'switchingToIexec' || 
+        submissionStep === 'protectingOnIexec' || 
+        submissionStep === 'grantingAccessOnIexec' ||
+        submissionStep === 'processingDataOnIexec' ||
+        submissionStep === 'waitingForIexecTaskResult'
+    ) {
+        performProtectionSteps();
+    }
+  }, [submissionStep, preparedDataForProtection, protectedDataAddress, currentChainId, dataProtector, switchChain, taskIdForProcessing, iappArgs]); // Added taskIdForProcessing and iappArgs to dependencies
+
+  const processFiles = async (files: FileList) => {
+    const newReceipts: UploadedReceipt[] = Array.from(files).map(file => {
+      const id = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
       const imageUrl = URL.createObjectURL(file);
       return {
         id,
@@ -111,549 +380,510 @@ function App() {
         total: '',
         itemDetails: [],
         isCollapsed: false,
-        isProcessing: false, // Initially false, OCR will set to true when its turn comes
+        isProcessing: false,
       };
     });
 
     setUploadedReceipts(prevReceipts => [...prevReceipts, ...newReceipts]);
-    setOcrQueue(prevQueue => [...prevQueue, ...newReceipts.map(r => r.id)]); // Add IDs to queue
+    setOcrQueue(prevQueue => [...prevQueue, ...newReceipts.map(r => r.id)]);
   };
 
-  const handleImageChange = (event) => {
+  const handleImageChange = (event: ChangeEvent<HTMLInputElement>) => {
     if (event.target.files && event.target.files.length > 0) {
       processFiles(event.target.files);
-      event.target.value = null; // Clear input field to allow re-uploading same files
+      event.target.value = ''; // Clear input
     }
   };
 
-  // Drag and Drop Handlers
-  const handleDragOver = (event) => {
+  const commonDragEventPrevent = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
+  }
+
+  const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
+    commonDragEventPrevent(event);
   };
 
-  const handleDragEnter = (event) => {
-    event.preventDefault();
-    event.stopPropagation();
+  const handleDragEnter = (event: DragEvent<HTMLDivElement>) => {
+    commonDragEventPrevent(event);
     if (event.dataTransfer.items && event.dataTransfer.items.length > 0) {
       setIsDragging(true);
     }
   };
 
-  const handleDragLeave = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      setIsDragging(false);
+  const handleDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    commonDragEventPrevent(event);
+    setIsDragging(false);
   };
 
-  const handleDrop = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      setIsDragging(false);
-
-      if (event.dataTransfer.files && event.dataTransfer.files.length > 0) {
-          processFiles(event.dataTransfer.files);
-          event.dataTransfer.clearData();
-      }
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    commonDragEventPrevent(event);
+    setIsDragging(false);
+    if (event.dataTransfer.files && event.dataTransfer.files.length > 0) {
+      processFiles(event.dataTransfer.files);
+      event.dataTransfer.clearData();
+    }
   };
 
-
-  // OCR Function using Tesseract.js (with further improved parsing)
-  const performOCR = async (receiptId, imageUrl) => {
-    let extractedText = '';
-
+  const performOCR = async (receiptId: string, imageUrl: string) => {
     try {
-      const { data: { text } } = await Tesseract.recognize(
+      const result = await Tesseract.recognize(
         imageUrl,
         'eng',
         {
-          logger: m => console.log(m),
-          // IMPORTANT: Specify CDN paths for core and language data for single-file deployment
-          corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@4.0.4/tesseract-core.wasm',
-          langPath: 'https://tessdata.projectnaptha.com/4.0.0', // Ensure this CDN path is stable and correct
+          logger: (m: LoggerMessage) => console.log(`OCR Progress (${receiptId}):`, m.status, Math.round(m.progress * 100) + '%'),
         }
-      );
-      extractedText = text;
+      ) as unknown as RecognizeResult;
+      
+      const extractedText = result.data.text;
       console.log(`OCR Raw Text for ${receiptId}:`, extractedText);
 
+      // Basic parsing - can be significantly improved
       const lines = extractedText.split('\n');
-      const newItems = [];
-      let currentItemId = 0;
-      let calculatedTotal = 0;
-      let detectedReceiptTotal = null;
-      let detectedSubTotal = null;
+      let detectedTotal = '';
+      const items: ReceiptItem[] = [];
+      
+      // Example: Look for lines that might contain 'Total' or a currency symbol and numbers
+      const totalKeywords = ['total', 'sum', 'celkem', 'amount'];
+      const itemRegex = /(.+?)\s+(\$?\d+\.\d{2})/; // Very basic item parsing
 
-      // New set to store lines that were identified as totals/subtotals/cash/change
-      const linesToExcludeFromItems = new Set();
-
-
-      // --- EVEN MORE IMPROVED Parsing Logic ---
-      const currencySymbols = '[$€£Kč]'; // Extendable list of currency symbols
-
-      // Item and price regex:
-      const itemPriceRegex = new RegExp(
-          `(?:^|\\s*)(.+?)\\s+${currencySymbols}?\\s*` +
-          `([+-]?\\s*\\d{1,3}(?:[\\s.,]\\d{3})*(?:[.,]\\d{1,2})?)` +
-          `\\s*${currencySymbols}?` +
-          `\\s*$`
-      );
-
-      const ignoreKeywords = [
-        'cash', 'change', 'tax', 'vat', 'discount', 'balance',
-        'amount', 'due', 'receipt', 'invoice', 'platba',
-        'karta', 'hotovost', 'dph', // Czech terms
-        'adresa', 'telefon', 'email', 'date', 'time', 'casher', 'manager',
-        'terminal', 'ref#', 'app#', 'rec#', 'thank you', 'customer signature',
-        'i agree', 'city index', 'cif', 'hotel', 'shop name', 'order id', 'order #',
-        'tel', 'phone', 'website', 'payment type', 'visa', 'card', 'kredit',
-        'debit', 'p.m.', 'a.m.', 'chk', 'tbl', 'gst', 'iva',
-        'qty', 'price', 'description', 'item', 'menu', 'bill', 'code',
-        'barcode', 'ticket', 'account', 'type', 'service',
-        'supermarket', 'lorem ipsum 258', 'city index 02025', 'tel.: +456-468-987-02',
-        'tel.', 'manager:', 'name'
-      ];
-
-      const totalKeywords = ['total', 'sum', 'celkem', 'total due', 'grand total', 'total amount', 'tota1'];
-      const subTotalKeywords = ['subtotal', 'sub-total', 'net total', 'sub tota1'];
-      const cashChangeKeywords = ['cash', 'change', 'platba', 'hotovost', 'karta'];
-
-
-      const createValueRegex = (keywords) => new RegExp(
-          `\\b(?:${keywords.join('|')})\\b[\\s\\xA0]*:?\\s*` +
-          `(${currencySymbols}?\\s*[+-]?\\s*\\d{1,3}(?:[\\s.,]\\d{3})*(?:[.,]\\d{1,2})?)` +
-          `\\s*${currencySymbols}?` +
-          `\\s*$`
-      , 'i');
-
-      const totalRegex = createValueRegex(totalKeywords);
-      const subTotalRegex = createValueRegex(subTotalKeywords);
-      const cashChangeValueRegex = createValueRegex(cashChangeKeywords);
-
-
-      for (const line of lines) {
-        let cleanedLine = line.trim();
-        const lowerCaseLine = cleanedLine.toLowerCase();
-
-        cleanedLine = cleanedLine.replace(/l /g, '1 ').replace(/l\./g, '1.');
-        cleanedLine = cleanedLine.replace(/o/g, '0'); // Note: This might over-correct, be cautious. Consider context or more specific replacements.
-        cleanedLine = cleanedLine.replace(/o\./g, '0.');
-        cleanedLine = cleanedLine.replace(/s\./g, '5.');
-        cleanedLine = cleanedLine.replace(/(\d)\s(\d{3}(?:[.,]\d{1,2})?)/g, '$1$2');
-
-
-        const currentTotalMatch = cleanedLine.match(totalRegex);
-        if (currentTotalMatch) {
-            let value = currentTotalMatch[1].replace(/[^\d.,+-]/g, '');
-            value = value.replace(',', '.');
-            const parsedValue = parseFloat(value);
-            if (!isNaN(parsedValue)) {
-                detectedReceiptTotal = parsedValue.toFixed(2);
-                linesToExcludeFromItems.add(cleanedLine);
+      lines.forEach((line: string, index: number) => {
+        const lowerLine = line.toLowerCase();
+        let isTotalLine = false;
+        for (const keyword of totalKeywords) {
+          if (lowerLine.includes(keyword)) {
+            const match = line.match(/\$?(\d+\.\d{2})/);
+            if (match && match[1]) {
+              detectedTotal = match[1];
+              isTotalLine = true;
+              break;
             }
-        }
-
-        const currentSubTotalMatch = cleanedLine.match(subTotalRegex);
-        if (currentSubTotalMatch && detectedSubTotal === null) {
-            let value = currentSubTotalMatch[1].replace(/[^\d.,+-]/g, '');
-            value = value.replace(',', '.');
-            const parsedValue = parseFloat(value);
-            if (!isNaN(parsedValue)) {
-                detectedSubTotal = parsedValue.toFixed(2);
-                linesToExcludeFromItems.add(cleanedLine);
-            }
-        }
-
-        const isCashChangeValueLine = cashChangeValueRegex.test(cleanedLine);
-        if (isCashChangeValueLine) {
-            linesToExcludeFromItems.add(cleanedLine);
-            continue;
-        }
-
-        if (linesToExcludeFromItems.has(cleanedLine)) {
-            continue;
-        }
-
-        const shouldIgnoreGeneralLine = ignoreKeywords.some(keyword => {
-            const regex = new RegExp(`\\b${keyword}\\b`, 'i');
-            return regex.test(lowerCaseLine);
-        });
-
-        if (shouldIgnoreGeneralLine || lowerCaseLine.match(/^\d+(\.\d+)?$/)) {
-            continue;
-        }
-
-
-        const match = cleanedLine.match(itemPriceRegex);
-        if (match) {
-          const item = match[1].trim();
-          let price = match[2].replace(/[^\d.,+-]/g, '');
-          price = price.replace(',', '.');
-
-          if (item.length > 1 && !item.match(/^[0-9\s\.\-—]*$/) && !isNaN(parseFloat(price))) {
-            newItems.push({ id: currentItemId++, item: item, price: parseFloat(price).toFixed(2) });
-            calculatedTotal += parseFloat(price);
           }
         }
+
+        if (!isTotalLine) {
+            const itemMatch = line.match(itemRegex);
+            if (itemMatch) {
+                items.push({ id: `item-${receiptId}-${index}`, description: itemMatch[1].trim(), quantity: '1', price: itemMatch[2] });
+            } else if (line.trim().length > 0 && items.length < 10) { // Fallback for non-matching lines as potential items
+                // items.push({ id: `item-${receiptId}-${index}`, description: line.trim(), quantity: '1', price: '0.00' });
+            }
+        }
+      });
+      if (!detectedTotal && items.length > 0) { // If no explicit total, sum item prices
+        detectedTotal = items.reduce((acc, item) => acc + parseFloat(item.price.replace('$', '') || '0'), 0).toFixed(2);
       }
 
-      let finalTotal = calculatedTotal.toFixed(2);
 
-      if (detectedReceiptTotal !== null) {
-          finalTotal = detectedReceiptTotal;
-      } else if (detectedSubTotal !== null) {
-          finalTotal = detectedSubTotal;
-      }
-
-      setUploadedReceipts(prevReceipts =>
-        prevReceipts.map(receipt =>
-          receipt.id === receiptId
-            ? {
-                ...receipt,
-                total: `$${finalTotal}`,
-                itemDetails: newItems,
-                isProcessing: false,
-              }
-            : receipt
-        )
-      );
-
+      setUploadedReceipts(prev => prev.map(r =>
+        r.id === receiptId ? { ...r, total: detectedTotal, itemDetails: items, isProcessing: false, extractedText, ocrFailed: false } : r
+      ));
     } catch (error) {
-      console.error(`OCR Error for ${receiptId}:`, error);
-      alert(`Error performing OCR for ${receiptId}. Please try again or check the image quality and contents.`);
-      setUploadedReceipts(prevReceipts =>
-        prevReceipts.map(receipt =>
-          receipt.id === receiptId
-            ? { ...receipt, isProcessing: false, total: '$0.00', itemDetails: [] }
-            : receipt
-        )
-      );
+      console.error(`Error during OCR for ${receiptId}:`, error);
+      setUploadedReceipts(prev => prev.map(r =>
+        r.id === receiptId ? { ...r, total: 'Error', itemDetails: [], isProcessing: false, extractedText: "OCR Failed", ocrFailed: true } : r
+      ));
     } finally {
-      setOcrQueue(prev => prev.filter(id => id !== receiptId));
-      setCurrentOcrProcessId(null);
+      // Move to the next item in the queue
+      setOcrQueue(prevQueue => prevQueue.filter(id => id !== receiptId));
+      // If this was the one being processed, clear currentOcrProcessId
+      if (currentOcrProcessId === receiptId) {
+        setCurrentOcrProcessId(null);
+      }
     }
   };
 
-  const handleItemDetailChange = (receiptId, itemId, field, value) => {
-    setUploadedReceipts(prevReceipts =>
-      prevReceipts.map(receipt => {
-        if (receipt.id === receiptId) {
-          const updatedItemDetails = receipt.itemDetails.map(item =>
-            item.id === itemId ? { ...item, [field]: value } : item
-          );
-          const newReceiptTotal = updatedItemDetails.reduce((sum, current) => {
-            return sum + parseFloat(current.price || 0);
-          }, 0).toFixed(2);
-          return {
-            ...receipt,
-            itemDetails: updatedItemDetails,
-            total: `$${newReceiptTotal}`
-          };
-        }
-        return receipt;
-      })
-    );
+  const handleItemDetailChange = (receiptId: string, itemId: string, field: keyof ReceiptItem, value: string) => {
+    setUploadedReceipts(prev => prev.map(r =>
+      r.id === receiptId ? {
+        ...r,
+        itemDetails: r.itemDetails.map(item =>
+          item.id === itemId ? { ...item, [field]: value } : item
+        )
+      } : r
+    ));
+  };
+  
+  // Recalculate total when item details change
+  useEffect(() => {
+    let hasAnyTotalChanged = false;
+    const updatedReceipts = uploadedReceipts.map(receipt => {
+      const oldTotal = receipt.total;
+      let newTotal = oldTotal;
+
+      if (receipt.itemDetails && receipt.itemDetails.length > 0) {
+        newTotal = receipt.itemDetails.reduce((sum, item) => {
+          const price = parseFloat(item.price?.replace('$', '').replace(',', '.') || '0');
+          return sum + price;
+        }, 0).toFixed(2);
+      } else if (receipt.itemDetails && receipt.itemDetails.length === 0) {
+        newTotal = '0.00'; // Reset to 0 if all items are removed
+      }
+
+      if (oldTotal !== newTotal) {
+        hasAnyTotalChanged = true;
+        return { ...receipt, total: newTotal };
+      }
+      return receipt;
+    });
+
+    if (hasAnyTotalChanged) {
+      setUploadedReceipts(updatedReceipts);
+    }
+  }, [uploadedReceipts]);
+
+  const handleCollapseToggle = (receiptId: string) => {
+    setUploadedReceipts(prev => prev.map(r =>
+      r.id === receiptId ? { ...r, isCollapsed: !r.isCollapsed } : r
+    ));
+  };
+  
+  const handleRemoveReceipt = (receiptId: string) => {
+    setUploadedReceipts(prev => prev.filter(r => r.id !== receiptId));
+    // Also remove from OCR queue if it's there
+    setOcrQueue(prev => prev.filter(id => id !== receiptId));
+    // If it was being processed, stop it
+    if (currentOcrProcessId === receiptId) {
+        setCurrentOcrProcessId(null); 
+        // Tesseract doesn't have a direct cancel for current job via this API structure easily.
+        // The 'finally' block in performOCR will try to move to next.
+    }
   };
 
-  const handleCollapseToggle = (receiptId) => {
-    setUploadedReceipts(prevReceipts =>
-      prevReceipts.map(receipt =>
-        receipt.id === receiptId
-          ? { ...receipt, isCollapsed: !receipt.isCollapsed }
-          : receipt
-      )
-    );
+  const handleAddItem = (receiptId: string) => {
+    setUploadedReceipts(prev => prev.map(r =>
+      r.id === receiptId ? {
+        ...r,
+        itemDetails: [
+          ...r.itemDetails,
+          { id: `manual-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`, description: '', quantity: '1', price: '0.00' }
+        ]
+      } : r
+    ));
   };
 
-  const handleRequestAddressChange = (event) => {
-    setRequestAddress(event.target.value);
-  };
+  const handleRequestAddressChange = (event: ChangeEvent<HTMLInputElement>) => setRequestAddress(event.target.value);
+  const handleTitleChange = (event: ChangeEvent<HTMLInputElement>) => setTitle(event.target.value);
+  
+  const { createExpenseRequest } = useExpenses();
 
-  const handleTitleChange = (event) => {
-    setTitle(event.target.value);
-  };
+  const handleSubmitRequest = async () => {
+    setSubmissionError(null); // Clear previous errors
 
-  const handleOpenRequest = () => {
-    alert('Open Request (functionality not available on single page)');
-  };
-
-  const handleCalculate = () => {
-    alert(`Grand Total recalculated: $${grandTotal}`);
-  };
-
-  const handleCreateRequest = () => {
-    if (isAnyOcrLoading || ocrQueue.length > 0) {
-      alert("Please wait for all receipts to finish processing before creating the request.");
+    if (!walletAccount) {
+      alert("Please connect your wallet first.");
+      return;
+    }
+    if (uploadedReceipts.length === 0 || !title || !requestAddress || uploadedReceipts.some(r => !r.total || r.total === '0.00' || r.itemDetails.length === 0 || r.itemDetails.some(item => !item.description || !item.price))) {
+      alert("Please fill all fields, ensure all receipts have items with descriptions/prices, and valid totals.");
       return;
     }
 
-    const finalRequestData = {
-      title,
-      grandTotal: `$${grandTotal}`,
-      allReceipts: uploadedReceipts.map(({ id, fileName, total, itemDetails }) => ({
-        id,
-        fileName,
-        total,
-        itemDetails,
-      })),
-      requestAddress,
-      timestamp: new Date().toLocaleString()
-    };
-    console.log("Final Request Data:", finalRequestData);
-    alert('Request created (check console for data). This is a single-page app.');
+    setSubmissionStep('validatingPassetHub');
 
-    setUploadedReceipts([]);
-    setOcrQueue([]);
-    setCurrentOcrProcessId(null);
-    setRequestAddress('');
-    setTitle('');
+    if (currentChainId !== passetHub.id) {
+      alert("Please switch to the Passet Hub network to submit the expense transaction.");
+      try {
+        setSubmissionStep('idle'); // Allow user to re-initiate after switching
+        await switchChain(passetHub.id);
+        // User will need to click submit again after chain switch is confirmed by WalletConnect/NavBar UI
+      } catch (err) {
+        console.error("Error during switch to Passet Hub:", err);
+        setSubmissionError("Failed to switch to Passet Hub. Please switch manually and try again.");
+        setSubmissionStep('error');
+      }
+      return;
+    }
+
+    setSubmissionStep('submittingToPassetHub');
+    try {
+      const hash = await createExpenseRequest(title, requestAddress) as Hash;
+      console.log("Expense request created on Passet Hub with hash:", hash);
+
+      // ... (Blockscout polling logic - this needs to be robust)
+      // For simplicity, assuming direct event retrieval or a more robust polling mechanism exists here
+      // This example will simplify the event retrieval part for brevity in this refactor
+      let receiptFromAPI: TransactionReceipt | null = null;
+      let attempts = 0;
+      const maxAttempts = 120; 
+      while (!receiptFromAPI && attempts < maxAttempts) {
+        try {
+          const response = await fetch(`https://blockscout-passet-hub.parity-testnet.parity.io/api/v2/addresses/${CONTRACT_ADDRESS}/logs`);
+          const data = await response.json() as BlockscoutResponse;
+          const log = data.items.find((log: BlockscoutLog) => log.transaction_hash === hash);
+          if (log) {
+            receiptFromAPI = { 
+              logs: [{ 
+                address: log.address.hash as `0x${string}`, 
+                topics: log.topics as Hex[], // Cast to Hex[]
+                data: log.data as Hex,       // Cast to Hex
+                blockNumber: BigInt(log.block_number), 
+                blockHash: log.block_hash as `0x${string}`, 
+                transactionHash: log.transaction_hash as `0x${string}`, 
+                logIndex: BigInt(log.index) 
+              }] 
+            } as unknown as TransactionReceipt;
+            break;
+          }
+        } catch (errFetchLogs) { // Used errFetchLogs
+            console.error('Error fetching logs from Blockscout:', errFetchLogs); 
+            // Optionally, break or retry fewer times if Blockscout is consistently failing
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        attempts++;
+      }
+
+      if (!receiptFromAPI) throw new Error('Passet Hub transaction not confirmed or logs not found after 120 seconds');
+
+      // Use encodeEventTopics to get the expected topic0 for ExpenseCreated
+      const topicsForExpenseCreated = encodeEventTopics({
+        abi: OnChainExpensesABI,
+        eventName: 'ExpenseCreated'
+      });
+
+      if (!topicsForExpenseCreated || topicsForExpenseCreated.length === 0 || !topicsForExpenseCreated[0]) {
+        throw new Error('Could not derive topic for ExpenseCreated event from ABI.');
+      }
+      const expectedEventTopic = topicsForExpenseCreated[0];
+
+      const expenseCreatedEvent = receiptFromAPI.logs.find((log: Log) => {
+        return log.topics[0] === expectedEventTopic;
+      });
+
+      if (!expenseCreatedEvent) throw new Error('ExpenseCreated event not found on Passet Hub');
+      
+      const decodedData = decodeEventLog({
+        abi: OnChainExpensesABI,
+        data: expenseCreatedEvent.data,
+        topics: expenseCreatedEvent.topics,
+        strict: false 
+      }) as unknown as ExpenseCreatedEvent;
+
+      if (!decodedData.args || typeof decodedData.args.expenseId === 'undefined') throw new Error('Failed to decode expenseId from Passet Hub event');
+      
+      const expenseId = Number(decodedData.args.expenseId);
+      console.log('Extracted expenseId from Passet Hub:', expenseId);
+
+      const dataToProtect: DataObject = {
+        expenseId: expenseId.toString(), // Ensure primitive types for top-level keys if possible
+        title,
+        payer: requestAddress,
+        totalAmount: grandTotal,
+        receipts: JSON.stringify(uploadedReceipts.map(receipt => ({
+          fileName: receipt.fileName,
+          total: receipt.total,
+          items: receipt.itemDetails.map(item => ({ description: item.description, quantity: item.quantity, price: item.price }))
+        })))
+      } as unknown as DataObject;
+
+      setPreparedDataForProtection({ expenseId, dataToProtect, title });
+      setSubmissionStep('switchingToIexec'); // Trigger next phase via useEffect
+
+    } catch (error) {
+      console.error("Error submitting expense to Passet Hub:", error);
+      setSubmissionError(`Failed during Passet Hub transaction: ${error instanceof Error ? error.message : String(error)}`);
+      setSubmissionStep('error');
+    }
+  };
+  
+
+  // Tailwind classes for common elements
+  const inputClass = "mt-1 block w-full px-3 py-2 bg-white border border-slate-300 rounded-md text-sm shadow-sm placeholder-slate-400 focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 disabled:bg-slate-50 disabled:text-slate-500 disabled:border-slate-200 disabled:shadow-none";
+  const buttonClass = "px-4 py-2 font-semibold text-sm bg-sky-500 text-white rounded-md shadow-sm hover:bg-sky-600 disabled:opacity-50";
+  const secondaryButtonClass = "px-3 py-1.5 font-medium text-xs bg-slate-200 text-slate-700 rounded hover:bg-slate-300";
+
+  const getButtonText = () => {
+    if (isChainSwitching) return `Switching to ${getChainName(currentChainId === passetHub.id ? iexec.id : passetHub.id)}...`;
+    switch (submissionStep) {
+      case 'idle': return 'Submit Expense Request';
+      case 'validatingPassetHub':
+        if (currentChainId !== passetHub.id) return `Switch to ${getChainName(passetHub.id)} to Submit`;
+        return 'Validating...';
+      case 'submittingToPassetHub': return 'Submitting to Passet Hub...';
+      case 'switchingToIexec': return 'Switching to iExec Bellecour...';
+      case 'protectingOnIexec': 
+        if (currentChainId !== iexec.id) return `Switch to ${getChainName(iexec.id)} to Protect`;
+        if (!dataProtector) return `Initializing on ${getChainName(iexec.id)}...`;
+        return 'Protecting Data on iExec...';
+      case 'grantingAccessOnIexec': return 'Granting Access on iExec...';
+      case 'processingDataOnIexec': return 'Starting Data Processing on iExec...';
+      case 'waitingForIexecTaskResult': 
+        if (taskIdForProcessing) return `Waiting for iExec Task: ${taskIdForProcessing.substring(0,8)}...`;
+        return 'Waiting for iExec Task...';
+      case 'completed': return 'Submitted & Processed!';
+      case 'error': return 'Error Occurred - Retry Submission';
+      default: return 'Submit Expense Request';
+    }
+  };
+
+  const isSubmitButtonDisabled = () => {
+    if (isChainSwitching || !walletAccount || uploadedReceipts.length === 0) return true;
+    if (submissionStep === 'submittingToPassetHub' ||
+        submissionStep === 'switchingToIexec' ||
+        submissionStep === 'grantingAccessOnIexec' ||
+        submissionStep === 'processingDataOnIexec' ||
+        submissionStep === 'waitingForIexecTaskResult' ||
+        submissionStep === 'completed') return true;
+    if (submissionStep === 'validatingPassetHub' && currentChainId !== passetHub.id) return true;
+    if (submissionStep === 'protectingOnIexec') {
+      return currentChainId !== iexec.id || !dataProtector;
+    } 
+    // For 'idle' and 'error' states, the button should generally be enabled 
+    // (unless other conditions like !walletAccount make it disabled)
+    // The initial checks (isChainSwitching, !walletAccount, etc.) cover these.
+    return false; // Default to not disabled if none of the above conditions met
   };
 
   return (
-    <>
-      {/* Injecting styles directly */}
-      <style>{appGlobalStyles}</style>
-      
-      <div className="App" style={{ display: 'flex', justifyContent: 'center', padding: '20px', minHeight: '100vh', boxSizing: 'border-box' }}>
-        <div style={{
-          border: '2px solid black',
-          padding: '20px',
-          borderRadius: '10px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '15px',
-          width: '800px',
-          position: 'relative',
-          alignItems: 'flex-start',
-          fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif',
-          boxSizing: 'border-box'
-        }}>
-          <h1 style={{ marginBottom: '10px', alignSelf: 'center' }}>AnonExpense</h1>
+    <div className="flex flex-col min-h-screen bg-slate-100 text-slate-800 font-sans">
+      <NavBar onWalletConnect={handleWalletConnect} />
 
-          <input
-            type="text"
-            placeholder="title"
-            value={title}
-            onChange={handleTitleChange}
-            style={{ width: 'calc(50% - 20px)', padding: '10px', border: '1px solid black', borderRadius: '5px' }}
-            disabled={isAnyOcrLoading}
-          />
+      <main className="flex-grow container mx-auto p-4 md:p-6 lg:p-8">
+        <div className="bg-white shadow-xl rounded-lg p-6 md:p-8">
+          <h1 className="text-3xl font-bold text-slate-700 mb-6 text-center">On-Chain Expense Reporter</h1>
 
-          <div
-            onDragOver={handleDragOver}
-            onDragEnter={handleDragEnter}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            style={{
-              border: `1px ${isDragging ? 'dashed blue' : 'solid black'}`,
-              borderRadius: '5px',
-              padding: '10px',
-              width: 'calc(50% - 20px)',
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              cursor: 'pointer',
-              transition: 'border-color 0.2s ease-in-out'
-            }}>
-            <label htmlFor="receipt-upload" style={{ cursor: 'pointer', padding: '5px' }}>
-              {isAnyOcrLoading ? `Processing ${ocrQueue.length + (currentOcrProcessId ? 1 : 0)} receipts...` : (isDragging ? 'Drop your images here!' : 'Drag & drop or click to upload multiple receipts')}
-            </label>
-            <input
-              id="receipt-upload"
-              type="file"
-              accept="image/*"
-              onChange={handleImageChange}
-              multiple
-              style={{ display: 'none' }}
-            />
-            {uploadedReceipts.map(receipt => (
-              <img
-                key={receipt.id}
-                src={receipt.imageUrl}
-                alt={`Receipt Preview ${receipt.fileName}`}
-                style={{ maxWidth: '100%', maxHeight: '100px', marginTop: '10px', border: '1px solid lightgray' }}
-              />
-            ))}
-            {isAnyOcrLoading && <p style={{ marginTop: '10px', color: 'blue' }}>Extracting text, please wait...</p>}
-            {ocrQueue.length > 0 && !isAnyOcrLoading && (
-              <p style={{ marginTop: '5px', color: 'gray' }}>{ocrQueue.length} receipts waiting for processing...</p>
+          {/* Request Details Section */}
+          <div className="grid md:grid-cols-2 gap-6 mb-8">
+            <div>
+              <label htmlFor="requestAddress" className="block text-sm font-medium text-slate-700">Request To Address</label>
+              <input type="text" id="requestAddress" value={requestAddress} onChange={handleRequestAddressChange} className={inputClass} placeholder="0x123..." disabled={submissionStep !== 'idle' && submissionStep !== 'error'} />
+            </div>
+      <div>
+              <label htmlFor="title" className="block text-sm font-medium text-slate-700">Expense Title</label>
+              <input type="text" id="title" value={title} onChange={(e) => handleTitleChange(e)} className={inputClass} placeholder="e.g., Team Dinner Q3" disabled={submissionStep !== 'idle' && submissionStep !== 'error'} />
+            </div>
+      </div>
+
+          {/* File Upload Section */}
+          <div 
+            className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors duration-200 ease-in-out
+                        ${isDragging ? 'border-sky-500 bg-sky-50' : 'border-slate-300 hover:border-slate-400'}
+                        ${(submissionStep !== 'idle' && submissionStep !== 'error') || isAnyOcrLoading ? 'opacity-70 cursor-not-allowed' : ''}`
+          }
+            onDragOver={(submissionStep === 'idle' || submissionStep === 'error') && !isAnyOcrLoading ? handleDragOver : undefined}
+            onDragEnter={(submissionStep === 'idle' || submissionStep === 'error') && !isAnyOcrLoading ? handleDragEnter : undefined}
+            onDragLeave={(submissionStep === 'idle' || submissionStep === 'error') && !isAnyOcrLoading ? handleDragLeave : undefined}
+            onDrop={(submissionStep === 'idle' || submissionStep === 'error') && !isAnyOcrLoading ? handleDrop : undefined}
+            onClick={() => (submissionStep === 'idle' || submissionStep === 'error') && !isAnyOcrLoading && document.getElementById('fileUpload')?.click()}
+          >
+            <input type="file" id="fileUpload" multiple onChange={handleImageChange} className="hidden" disabled={(submissionStep !== 'idle' && submissionStep !== 'error') || isAnyOcrLoading} />
+            {/* Always show the upload prompt, remove the global spinner from here */}
+            <p className="text-slate-500">Drag & drop receipt images here, or click to select files.</p>
+            {(ocrQueue.length > 0 || currentOcrProcessId) && (
+              <p className="text-xs text-slate-400 mt-2">
+                {ocrQueue.length + (currentOcrProcessId ? 1 : 0)} item(s) currently in OCR process.
+              </p>
             )}
           </div>
 
-          <input
-            type="text"
-            placeholder="request address"
-            value={requestAddress}
-            onChange={handleRequestAddressChange}
-            style={{ width: 'calc(50% - 20px)', padding: '10px', border: '1px solid black', borderRadius: '5px' }}
-            disabled={isAnyOcrLoading}
-          />
+          {/* Uploaded Receipts Section */}
+          {uploadedReceipts.length > 0 && (
+            <div className="mt-8">
+              <h2 className="text-xl font-semibold text-slate-700 mb-4">Uploaded Receipts</h2>
+              <div className="space-y-4">
+                {uploadedReceipts.map((receipt) => (
+                  <div key={receipt.id} className={`bg-slate-50 p-4 rounded-lg shadow ${(submissionStep !== 'idle' && submissionStep !== 'error') ? 'opacity-70' : ''}`}>
+                    <div className="flex justify-between items-center mb-2">
+                      <h3 className="font-semibold text-slate-600 truncate w-3/4" title={receipt.fileName}>{receipt.fileName}</h3>
+                      <div className="flex items-center space-x-2">
+                        {receipt.isProcessing && (
+                             <svg className="animate-spin h-4 w-4 text-sky-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                             </svg>
+                        )}
+                        <span className="text-sm font-bold text-slate-700">Total: ${receipt.total || '0.00'}</span>
+                        <button onClick={() => (submissionStep === 'idle' || submissionStep === 'error') && handleCollapseToggle(receipt.id)} className={secondaryButtonClass} disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}>
+                          {receipt.isCollapsed ? 'Expand' : 'Collapse'}
+                        </button>
+                        <button onClick={() => (submissionStep === 'idle' || submissionStep === 'error') && handleRemoveReceipt(receipt.id)} className="text-red-500 hover:text-red-700 font-medium text-xs" disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}>Remove</button>
+                      </div>
+                    </div>
+                    {!receipt.isCollapsed && (
+                      <div className="mt-3 border-t border-slate-200 pt-3">
+                        {receipt.ocrFailed ? (
+                          // OCR Failed View
+                          <div>
+                            <p className="text-red-500 font-semibold mb-2">OCR Failed. Please enter details manually.</p>
+                            <div className="mb-4">
+                                <img src={receipt.imageUrl} alt={receipt.fileName} className="max-w-xs max-h-48 rounded border border-slate-300"/>
+                            </div>
+                            <div className="mb-3">
+                                <span className="text-sm font-medium text-slate-700">Currency: </span>
+                                <span className="text-sm text-slate-600">USD (Fixed)</span>
+                            </div>
 
-          <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
-            <button onClick={handleOpenRequest} style={{ padding: '8px 15px', border: '1px solid black', borderRadius: '5px', background: 'white', cursor: 'pointer' }} disabled={isAnyOcrLoading}>
-              open requests
-            </button>
-            <button onClick={handleCalculate} style={{ padding: '8px 15px', border: '1px solid black', borderRadius: '5px', background: 'white', cursor: 'pointer' }} disabled={isAnyOcrLoading}>
-              calculate
-            </button>
-            <span style={{ marginLeft: '20px' }}>total: </span>
-            <input
-              type="text"
-              value={`$${grandTotal}`}
-              readOnly
-              style={{ border: 'none', borderBottom: '1px solid black', outline: 'none', width: '80px', textAlign: 'left' }}
-            />
-          </div>
-
-          <div style={{
-            position: 'absolute',
-            right: '20px',
-            top: '20px',
-            border: '2px solid blue',
-            padding: '15px',
-            borderRadius: '10px',
-            width: '300px',
-            minHeight: '300px',
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'space-between',
-            boxSizing: 'border-box',
-            overflowY: 'auto'
-          }}>
-            <h2>result statement</h2>
-            {uploadedReceipts.length === 0 && !isAnyOcrLoading && (
-              <p style={{ textAlign: 'center', marginTop: '20px' }}>Upload receipts to see extracted items.</p>
-            )}
-            {uploadedReceipts.map(receipt => (
-              <div key={receipt.id} style={{ border: '1px solid #eee', borderRadius: '5px', marginBottom: '10px', overflow: 'hidden' }}>
-                <div
-                  onClick={() => handleCollapseToggle(receipt.id)}
-                  style={{
-                    padding: '10px',
-                    background: '#f9f9f9',
-                    borderBottom: '1px solid #eee',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    fontWeight: 'bold'
-                  }}
-                >
-                  <span>{receipt.fileName} ({receipt.isProcessing ? 'Processing...' : receipt.total || 'N/A'})</span>
-                  <span>{receipt.isCollapsed ? '▼' : '▲'}</span>
-                </div>
-
-                {!receipt.isCollapsed && (
-                  <div style={{ padding: '10px' }}>
-                    {receipt.isProcessing ? (
-                      <p>Extracting items for this receipt...</p>
-                    ) : receipt.itemDetails.length > 0 ? (
-                      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                        <thead>
-                          <tr>
-                            <th style={{ borderBottom: '1px solid #ccc', padding: '8px', textAlign: 'left' }}>Item</th>
-                            <th style={{ borderBottom: '1px solid #ccc', padding: '8px', textAlign: 'right' }}>Price</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {receipt.itemDetails.map(item => (
-                            <tr key={item.id}>
-                              <td style={{ padding: '8px' }}>
-                                <input
-                                  type="text"
-                                  value={item.item}
-                                  onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'item', e.target.value)}
-                                  style={{ border: 'none', width: '100%', outline: 'none' }}
-                                />
-                              </td>
-                              <td style={{ padding: '8px' }}>
-                                <input
-                                  type="text"
-                                  value={item.price}
-                                  onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'price', e.target.value)}
-                                  style={{ border: 'none', width: '100%', outline: 'none', textAlign: 'right' }}
-                                />
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    ) : (
-                      <p>No items extracted or error occurred for this receipt.</p>
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2 text-xs font-medium text-slate-500">
+                              <div>Item Description</div>
+                              <div>Quantity</div>
+                              <div>Price ($)</div>
+                            </div>
+                            {receipt.itemDetails.map((item) => (
+                              <div key={item.id} className="grid grid-cols-1 md:grid-cols-3 gap-2 items-center mb-1">
+                                <input type="text" value={item.description} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'description', e.target.value)} className={`${inputClass} text-xs p-1`} placeholder="Item name" disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
+                                <input type="text" value={item.quantity} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'quantity', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} placeholder="1" disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
+                                <input type="text" value={item.price} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'price', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} placeholder="0.00" disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
+                              </div>
+                            ))}
+                            <button onClick={() => (submissionStep === 'idle' || submissionStep !== 'error') && handleAddItem(receipt.id)} className={`${secondaryButtonClass} mt-2`} disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}>
+                              Add Item
+                            </button>
+                          </div>
+                        ) : (
+                          // OCR Succeeded or Pending View (Original item display)
+                          <div>
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2 text-xs font-medium text-slate-500">
+                              <div>Item Description</div>
+                              <div>Quantity</div>
+                              <div>Price ($)</div>
+                            </div>
+                            {receipt.itemDetails.map((item) => (
+                              <div key={item.id} className="grid grid-cols-1 md:grid-cols-3 gap-2 items-center mb-1">
+                                <input type="text" value={item.description} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'description', e.target.value)} className={`${inputClass} text-xs p-1`} disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
+                                <input type="text" value={item.quantity} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'quantity', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
+                                <input type="text" value={item.price} onChange={(e) => handleItemDetailChange(receipt.id, item.id, 'price', e.target.value)} className={`${inputClass} text-xs p-1 w-1/2 md:w-full`} disabled={(submissionStep !== 'idle' && submissionStep !== 'error')}/>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                         {receipt.extractedText && (
+                            <details className="mt-2 text-xs">
+                                <summary className="cursor-pointer text-slate-400 hover:text-slate-600">View raw OCR text</summary>
+                                <pre className="mt-1 p-2 bg-slate-200 rounded text-slate-600 max-h-32 overflow-auto">{receipt.extractedText}</pre>
+                            </details>
+                        )}
+                      </div>
                     )}
                   </div>
-                )}
+                ))}
               </div>
-            ))}
-            {uploadedReceipts.length > 0 && (
-              <div style={{
-                marginTop: '15px',
-                paddingTop: '10px',
-                borderTop: '2px solid #ccc',
-                fontWeight: 'bold',
-                display: 'flex',
-                justifyContent: 'space-between'
-              }}>
-                <span>Grand Total:</span>
-                <span>${grandTotal}</span>
-              </div>
-            )}
-            <button onClick={handleCreateRequest} style={{ padding: '10px 20px', border: '1px solid blue', borderRadius: '5px', background: 'white', cursor: 'pointer', marginTop: '15px' }} disabled={isAnyOcrLoading || ocrQueue.length > 0}>
-              create request
-            </button>
-          </div>
+            </div>
+          )}
+
+          {/* Grand Total & Submit Section */}
+          {uploadedReceipts.length > 0 && (
+            <div className="mt-10 pt-6 border-t border-slate-200 flex flex-col items-end">
+              <p className="text-2xl font-bold text-slate-700 mb-4">Grand Total: ${grandTotal}</p>
+              <button
+                onClick={submissionStep === 'error' ? () => { setSubmissionStep('idle'); setSubmissionError(null); } : handleSubmitRequest}
+                className={`${buttonClass} w-full md:w-auto`}
+                disabled={isSubmitButtonDisabled()}
+              >
+                {getButtonText()}
+              </button>
+               {!walletAccount && <p className="text-xs text-red-500 mt-1">Wallet not connected.</p>}
+               {submissionError && <p className="text-xs text-red-500 mt-1">Error: {submissionError}</p>}
+               {chainError && !submissionError && <p className="text-xs text-red-500 mt-1">Chain Switch Error: {chainError}</p>}
+            </div>
+          )}
         </div>
-      </div>
-    </>
+      </main>
+
+      <footer className="text-center p-4 text-xs text-slate-500 border-t border-slate-200 bg-slate-100">
+        <p>&copy; {new Date().getFullYear()} On-Chain Expensing. All rights reserved (not really).</p>
+      </footer>
+    </div>
   );
 }
 
 export default App;
-
-// To make this runnable directly in an HTML file (for example):
-// 1. Save this entire content as `ReceiptOcrApp.tsx` (or .jsx if not using TypeScript features explicitly beyond JSX)
-// 2. Create an HTML file like this:
-/*
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Receipt OCR App</title>
-    <script src="https://unpkg.com/react@19.1.0/umd/react.development.js"></script>
-    <script src="https://unpkg.com/react-dom@19.1.0/umd/react-dom.development.js"></script>
-    <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
-    </head>
-<body>
-    <noscript>You need to enable JavaScript to run this app.</noscript>
-    <div id="root"></div>
-
-    <script type="text/babel" data-presets="react">
-        // Paste the entire content of ReceiptOcrApp.tsx (this file) here,
-        // OR if saved as a separate file and your server can serve it:
-        // import App from './ReceiptOcrApp.tsx'; // (This import won't work directly in browser like this without a module system)
-
-        // For a truly single HTML file experience without a server, you'd paste the JS/TSX code here:
-
-        // --- Start of pasted ReceiptOcrApp.tsx content (excluding this comment block) ---
-
-        // (The App component code as defined above, starting with its imports if they were not global,
-        // but since React is global from CDN, we'd use that. Tesseract is imported inside App)
-
-        // Example: Assume 'App' component and 'appGlobalStyles' const are defined directly above or pasted in.
-        // If you paste the whole file content here, `App` will be defined.
-
-        // --- End of pasted ReceiptOcrApp.tsx content ---
-
-        const StrictApp = () => (
-          <React.StrictMode>
-            <App />
-          </React.StrictMode>
-        );
-        
-        const container = document.getElementById('root');
-        const root = ReactDOM.createRoot(container);
-        root.render(<StrictApp />);
-    </script>
-</body>
-</html>
-*/
