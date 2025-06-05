@@ -1,14 +1,17 @@
 {
-  "name": "iexec-hello-world-iapp",
-  "version": "0.0.1",
-  "description": "",
+  "name": "onchainexpenses-iapp",
+  "version": "1.0.0",
+  "description": "iExec iApp for processing expenses and writing to a smart contract.",
   "main": "src/app.js",
-  "type": "module",
-  "engines": {
-    "npm": "<7.0.0"
+  "scripts": {
+      "start": "node src/app.js"
   },
   "dependencies": {
     "@iexec/dataprotector-deserializer": "^0.1.1",
-    "figlet": "^1.7.0"
-  }
+    "ethers": "^6.13.5",
+    "figlet": "^1.8.1"
+  },
+  "devDependencies": {},
+  "author": "",
+  "license": "MIT"
 }
